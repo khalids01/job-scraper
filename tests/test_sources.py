@@ -19,9 +19,7 @@ from job_scraper.storage import Store
 
 @pytest.fixture
 def config(tmp_path):
-    return Settings(
-        api_key="r" * 40, admin_key="a" * 40, database=tmp_path / "jobs.sqlite3", request_delay=0
-    )
+    return Settings(api_key="r" * 40, database=tmp_path / "jobs.sqlite3", request_delay=0)
 
 
 def sample(**changes):
@@ -368,7 +366,7 @@ def test_legacy_database_backfill_hides_unrelated_without_deleting(config):
 def test_source_registry_api_and_container_defaults_stay_aligned():
     assert set(SOURCES) == set(Source) == set(SPECS)
     assert len(RunRequest(sources=list(SOURCES)).sources) == len(SOURCES)
-    for filename in [".env.example", "compose.yaml"]:
+    for filename in ["compose.yaml"]:
         assert ",".join(SOURCES) in Path(filename).read_text()
 
 

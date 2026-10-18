@@ -1,24 +1,41 @@
-"""API-key roles and bounded, per-process sliding-window request limits."""
+"""Single environment API key and an atomic Redis sliding-window quota."""
 
+import hashlib
 import hmac
 import math
-import threading
-import time
-from collections import OrderedDict, deque
 from dataclasses import dataclass
+from uuid import uuid4
 
+from redis.asyncio import Redis
+from redis.backoff import NoBackoff
+from redis.exceptions import RedisError
+from redis.retry import Retry
 from starlette.responses import JSONResponse
 
+# Redis owns the clock and the entire check/update, so concurrent clients and app
+# restarts share one accurate 60-second window. Members expire with the Redis key.
+SLIDING_WINDOW = """
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - 60000)
+local count = redis.call('ZCARD', KEYS[1])
+local allowed = 0
+if count < tonumber(ARGV[1]) then
+    redis.call('ZADD', KEYS[1], now, ARGV[2])
+    redis.call('PEXPIRE', KEYS[1], 60000)
+    count = count + 1
+    allowed = 1
+end
+-- If MAX_REQ_PER_MIN was reduced, wait until enough older events expire.
+local rank = math.max(0, count - tonumber(ARGV[1]))
+local oldest = redis.call('ZRANGE', KEYS[1], rank, rank, 'WITHSCORES')
+local reset = tonumber(oldest[2]) + 60000
+return {allowed, count, math.max(1, reset - now), reset}
+"""
 
-def key_role(key, settings):
-    if key is None:
-        return None
-    supplied = key.encode()
-    if hmac.compare_digest(supplied, settings.admin_key.encode()):
-        return "admin"
-    if hmac.compare_digest(supplied, settings.api_key.encode()):
-        return "read"
-    return None
+
+def valid_key(key, settings):
+    return key is not None and hmac.compare_digest(key.encode(), settings.api_key.encode())
 
 
 @dataclass(frozen=True)
@@ -26,46 +43,49 @@ class Decision:
     allowed: bool
     limit: int
     remaining: int
-    reset_after: int
+    retry_after: int
+    reset_at: int
 
     def headers(self):
-        result = {
+        headers = {
             "X-RateLimit-Limit": str(self.limit),
             "X-RateLimit-Remaining": str(self.remaining),
-            "X-RateLimit-Reset": str(math.ceil(time.time() + self.reset_after)),
+            "X-RateLimit-Reset": str(self.reset_at),
         }
         if not self.allowed:
-            result["Retry-After"] = str(self.reset_after)
-        return result
+            headers["Retry-After"] = str(self.retry_after)
+        return headers
 
 
-class RateLimiter:
-    def __init__(self, *, max_clients=4096, clock=time.monotonic):
-        self.max_clients, self.clock = max_clients, clock
-        self.buckets = OrderedDict()
-        self.lock = threading.Lock()
+class RedisRateLimiter:
+    def __init__(self, settings):
+        self.limit = settings.max_req_per_min
+        self.key = "job-scraper:rate:" + hashlib.sha256(settings.api_key.encode()).hexdigest()
+        self.redis = Redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+            retry=Retry(NoBackoff(), 0),
+        )
 
-    def consume(self, identity, limit):
-        with self.lock:
-            current = self.clock()
-            cutoff = current - 60
-            # Ordered by last activity; remove expired identities without scanning all clients.
-            while self.buckets and next(iter(self.buckets.values()))[-1] <= cutoff:
-                self.buckets.popitem(last=False)
-            bucket = self.buckets.get(identity)
-            if bucket is None:
-                if len(self.buckets) >= self.max_clients:
-                    return Decision(False, limit, 0, 60)
-                bucket = self.buckets[identity] = deque()
-            while bucket and bucket[0] <= cutoff:
-                bucket.popleft()
-            if len(bucket) >= limit:
-                return Decision(False, limit, 0, max(1, math.ceil(bucket[0] + 60 - current)))
-            bucket.append(current)
-            self.buckets.move_to_end(identity)
-            return Decision(
-                True, limit, limit - len(bucket), max(1, math.ceil(bucket[0] + 60 - current))
-            )
+    async def ping(self):
+        await self.redis.ping()
+
+    async def close(self):
+        await self.redis.aclose()
+
+    async def consume(self):
+        allowed, count, delay, reset = await self.redis.eval(
+            SLIDING_WINDOW, 1, self.key, self.limit, uuid4().hex
+        )
+        return Decision(
+            bool(allowed),
+            self.limit,
+            max(0, self.limit - count),
+            max(1, math.ceil(delay / 1000)),
+            math.ceil(reset / 1000),
+        )
 
 
 class RateLimitMiddleware:
@@ -75,36 +95,29 @@ class RateLimitMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["path"] == "/healthz":
             return await self.app(scope, receive, send)
-        settings, limiter = self.state.settings, self.state.limiter
-        # Use the same first header as Starlette/FastAPI, including for duplicate headers.
         raw = next(
             (value for name, value in scope.get("headers", []) if name.lower() == b"x-api-key"),
             None,
         )
-        role = key_role(raw.decode("latin-1") if raw is not None else None, settings)
-        # ASGI's client is set by the server's trusted-proxy handling. Never trust raw XFF here.
-        address = scope.get("client")
-        address = address[0] if address else "unknown"
-        checks = [(f"ip:{address}", settings.ip_rate_limit_per_minute)]
-        if role:
-            checks.append((f"key:{role}", settings.api_rate_limit_per_minute))
-            if role == "admin" and scope["method"] not in {"GET", "HEAD", "OPTIONS"}:
-                checks.append(("admin:write", settings.admin_rate_limit_per_minute))
-        else:
-            # Arbitrary attacker-supplied keys never become bucket identifiers.
-            checks.append((f"invalid:{address}", settings.auth_rate_limit_per_minute))
-        decisions = []
-        for identity, limit in checks:
-            decision = limiter.consume(identity, limit)
-            if not decision.allowed:
-                response = JSONResponse(
-                    {"detail": "API request rate limit exceeded"},
-                    status_code=429,
-                    headers=decision.headers(),
-                )
-                return await response(scope, receive, send)
-            decisions.append(decision)
-        limiting = min(decisions, key=lambda decision: decision.remaining)
+        if not valid_key(raw.decode("latin-1") if raw is not None else None, self.state.settings):
+            return await JSONResponse({"detail": "Invalid API key"}, status_code=401)(
+                scope, receive, send
+            )
+        try:
+            decision = await self.state.limiter.consume()
+        except RedisError:
+            # Never expose connection details or silently disable the quota on outage.
+            return await JSONResponse(
+                {"detail": "Rate limiter unavailable"},
+                status_code=503,
+                headers={"Retry-After": "2"},
+            )(scope, receive, send)
+        if not decision.allowed:
+            return await JSONResponse(
+                {"detail": "API request rate limit exceeded"},
+                status_code=429,
+                headers=decision.headers(),
+            )(scope, receive, send)
 
         async def send_with_headers(message):
             if message["type"] == "http.response.start":
@@ -114,7 +127,7 @@ class RateLimitMiddleware:
                         *message.get("headers", []),
                         *(
                             (key.lower().encode(), value.encode())
-                            for key, value in limiting.headers().items()
+                            for key, value in decision.headers().items()
                         ),
                     ],
                 }

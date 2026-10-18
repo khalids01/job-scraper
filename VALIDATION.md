@@ -54,3 +54,28 @@ in `LIVE_CHECK.json`; it is historical evidence, not the current scope or verifi
   committed. Docker Hub credentials are separate.
 - Request limits are in-memory for the enforced single-process deployment; restarts reset API
   windows. Existing source-fetch cooldowns still persist in SQLite across restarts.
+
+
+## Redis and simplified environment configuration — 2026-10-19, version 0.3.0
+
+- Removed the separate admin key, role model and per-IP/admin/authentication quotas. Runtime
+  authentication/rate settings are now just `API_KEY` and `MAX_REQ_PER_MIN`. `.env.example`
+  contains those two settings. Existing local API_KEY was preserved; obsolete fields were removed.
+- All protected routes use the same API key, including collection commands. No panel or dashboard
+  was added. Source collection cooldowns and all 23 provider adapters remain intact.
+- The limiter now runs an atomic sliding-window Lua script against real Redis, using Redis time,
+  expiring sorted-set events and a hashed key identifier. Quota survives scraper restarts and is
+  shared across app instances using the same key. Redis failure gives 503; no in-memory fallback.
+- **108 host tests passed against a private real Redis 8 instance**, covering concurrent consumers,
+  shared windows across app instances, scraper restarts, TTL/expired-event pruning, quota reduction,
+  authentication, common read/write quotas, response headers, Redis outage and startup failure.
+  Synthetic source fixtures remain offline; no job-provider requests were made for this change.
+- The Python 3.12 Docker test target passed its initial 107-test Redis suite before the final
+  quota-reduction regression was added. The publishing workflow runs the complete updated suite.
+- Compose includes Redis with private networking, health checks, persistent AOF volume and no host
+  port or UI. Optional REDIS_URL supports connecting to an existing Redis; Compose supplies it.
+
+- Runtime containers also passed a private-network integration check: the API exhausted its
+  configured two-request quota, kept returning 429 after a scraper restart and a Redis AOF restart,
+  returned 503 while Redis was stopped, and recovered with the same quota after Redis restarted.
+  Temporary containers, volumes and network were removed; no production data was used.

@@ -10,8 +10,15 @@ a VPS. There are 23 reviewed JSON/RSS/Atom source adapters. No Python installati
 cp .env.example .env
 ```
 
-Generate **two different** keys with `openssl rand -hex 32`, and put them into `.env` as `API_KEY`
-(desktop read access) and `ADMIN_API_KEY` (collection controls). Neither has a default.
+Set just these two values in `.env`:
+
+```dotenv
+API_KEY=your-secret-key-at-least-32-characters
+MAX_REQ_PER_MIN=120
+```
+
+Generate a random key with `openssl rand -hex 32`. Docker Compose starts Redis and configures
+its internal connection automatically. There is one API key, one request quota, and no admin panel.
 
 ```bash
 docker compose up -d --build
@@ -24,7 +31,7 @@ address. Do not expose an unencrypted API key over the internet. HTTP on localho
 for a local container. The container runs as an unprivileged user, with a read-only root filesystem.
 
 Collection starts automatically for sources that have never been attempted, then repeats every
-six hours. Each source's last attempt is persisted **before** fetching; failed requests, admin
+six hours. Each source's last attempt is persisted **before** fetching; failed requests, manual
 requests, and container restarts all respect the same cooldown. Lower intervals are rejected.
 There are no automatic retries of blocked, rate-limited, or failed requests.
 
@@ -34,47 +41,47 @@ docker compose down
 ```
 
 The `scraper-data` named volume survives `down` and image rebuilds. `down -v` deletes the stored
-jobs and collection history. To back up a running database, use SQLite's backup API rather than
+jobs, collection history, and Redis quota data. To back up a running database, use SQLite's backup API rather than
 copying only the database file while its WAL is active. Rotate keys by updating `.env` and running
 `docker compose up -d` again. Keep `.env` out of version control.
 
 ## API
 
-All endpoints except `/healthz` require `X-API-Key`. Read routes accept either key;
-collection start/cancel require the admin key. Keep the read key in the desktop's OS credential
-store and make requests through Rust. Do not embed either key in frontend assets.
+All endpoints except `/healthz` require `X-API-Key` matching the single `API_KEY` environment
+variable. The same key authorizes job reads and collection start/cancel commands. No admin key,
+login screen, dashboard, or admin panel is involved. Keep the key in the desktop's OS credential
+store and send requests through Rust. This scraper key is separate from the Docker Hub token.
 
-These are **scraper API keys**, separate from the Docker Hub publishing token. Generate two
-independent values with `openssl rand -hex 32` and set `API_KEY` and `ADMIN_API_KEY` in the server's
-`.env`. The service refuses missing, short, or identical keys. Send the read value as
-`X-API-Key` from the desktop; reserve the admin value for collection controls. Keep `.env` private.
+### Redis request limit
 
-### API request limits
+`MAX_REQ_PER_MIN` is the only API rate setting (default 120). All authenticated requests share
+one **sliding 60-second window** stored in Redis, including read requests, collection controls,
+and requests that later return errors. Missing or invalid keys receive 401 and do not consume the
+configured key's quota. `/healthz` is public and exempt from the request quota.
 
-| Limit | Default | Environment variable |
-| --- | ---: | --- |
-| Requests per valid read/admin key, across endpoints | 120/minute | `API_RATE_LIMIT_PER_MINUTE` |
-| Admin write attempts, including start and cancel | 10/minute | `ADMIN_RATE_LIMIT_PER_MINUTE` |
-| Requests with missing/invalid keys, per client IP | 30/minute | `AUTH_RATE_LIMIT_PER_MINUTE` |
-| All requests per client IP | 300/minute | `IP_RATE_LIMIT_PER_MINUTE` |
+Exceeding the quota returns **429** with `Retry-After` in seconds. Responses include
+`X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` (Unix timestamp of the next
+slot). Redis checks and increments the sorted-set window atomically using its own clock, so
+concurrent clients cannot exceed the configured allowance. Scraper process restarts keep the
+quota. Redis keys expire automatically after inactivity; the API key itself is never stored in
+Redis, only its SHA-256-derived identifier and event timestamps.
 
-The limits use a sliding 60-second window. Exceeding any applicable limit returns **HTTP 429**
-and `Retry-After` in seconds. `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and
-`X-RateLimit-Reset` (Unix timestamp when the earliest slot becomes available) describe the bucket
-closest to exhaustion. Counts include failed requests. `/healthz` is exempt for liveness checks.
-Admin reads use the normal key quota; writes must fit both quotas. Two separate keys have separate
-key quotas, while requests from the same IP share the overall IP quota.
+Compose includes a private Redis service with a named volume and AOF persistence. It has no
+published port and no UI. Redis must be reachable before the scraper starts. If Redis goes down
+after startup, authenticated API requests return **503**, never an unmetered fallback; they
+recover when Redis becomes available. `/healthz` also reports 503 during a Redis outage.
 
-Client identities come from the ASGI server, never directly from `X-Forwarded-For`. Configure
-Uvicorn's trusted proxy addresses correctly when deploying behind a reverse proxy. Untrusted
-headers do not create independent limiter identities. Invalid key values are never stored in
-limiter buckets. At most 4096 active rate-limit buckets are retained; new identities fail closed
-when capacity is exhausted. `RATE_LIMIT_MAX_CLIENTS` can adjust this bound for direct Uvicorn use.
-Limits are in memory and reset on server restart; the supported deployment remains one worker
-and one replica per database. Multi-replica rate limiting needs shared state.
+For an existing Redis deployment, optionally set `REDIS_URL`; Compose defaults to
+`redis://redis:6379/0`, while standalone Uvicorn defaults to `redis://127.0.0.1:6379/0`.
+`rediss://` and Unix socket URLs are supported. Multiple apps using the same API key/Redis share
+the quota; the collection/SQLite service still requires one worker per database.
 
-These API limits are separate from **source collection limits**: each source still has its
-persistent six-hour cooldown, response/request/job bounds, and upstream rate-limit handling.
+When upgrading, retain your existing `API_KEY`, set `MAX_REQ_PER_MIN`, and remove the obsolete
+`ADMIN_API_KEY`, `API_RATE_LIMIT_PER_MINUTE`, `ADMIN_RATE_LIMIT_PER_MINUTE`,
+`AUTH_RATE_LIMIT_PER_MINUTE`, and `IP_RATE_LIMIT_PER_MINUTE` settings. They are no longer used.
+
+The per-source six-hour collection cooldown, response/request/job bounds, and upstream rate-limit
+handling remain separate from the API quota.
 
 | Method | Path | Behavior |
 | --- | --- | --- |
@@ -84,11 +91,11 @@ persistent six-hour cooldown, response/request/job bounds, and upstream rate-lim
 | GET | `/v1/sources` | Enabled sources, last attempt, next allowed attempt, limits |
 | GET | `/v1/runs` | Recent collection runs and per-source results |
 | GET | `/v1/runs/{id}` | Run status, counts, truncation, invalid records, errors |
-| POST | `/v1/runs` | Start a bounded collection run (admin, HTTP 202) |
-| DELETE | `/v1/runs/{id}` | Cancel the current run (admin) |
+| POST | `/v1/runs` | Start a bounded collection run (HTTP 202) |
+| DELETE | `/v1/runs/{id}` | Cancel the current run |
 | GET | `/openapi.json` | Authenticated machine-readable API schema |
 
-Examples below assume you exported `API_KEY` and `ADMIN_API_KEY` in your shell. Compose reads `.env`
+Examples below assume you exported `API_KEY` in your shell. Compose reads `.env`
 itself; it does not export those variables into your shell.
 
 ```bash
@@ -97,7 +104,7 @@ curl -H "X-API-Key: $API_KEY" \
 
 curl -H "X-API-Key: $API_KEY" http://127.0.0.1:8787/v1/runs
 
-curl -X POST -H "X-API-Key: $ADMIN_API_KEY" -H 'Content-Type: application/json' \
+curl -X POST -H "X-API-Key: $API_KEY" -H 'Content-Type: application/json' \
   -d '{"sources":["himalayas"]}' http://127.0.0.1:8787/v1/runs
 ```
 
@@ -201,7 +208,7 @@ first-seen time on upsert. Cross-source copies remain separate with their proven
 
 Configure `SOURCES`, `SEARCH_TERMS`, `SCRAPE_INTERVAL_SECONDS`, `MAX_JOBS`, `MAX_PAGES`, and
 `RETENTION_DAYS` in `.env`. **If you already have an `.env` listing only the original three sources,
-update its `SOURCES` from `.env.example`, or remove that line to use Compose's expanded default.**
+remove that line to use the expanded default; source IDs are listed above.**
 Run `docker compose up -d --build` after configuration changes. Existing unrelated database rows
 are hidden by a versioned scope migration; they are not deleted as part of this update.
 
@@ -214,8 +221,7 @@ publication date. Older jobs in a feed may still be returned until they expire o
 Preserve the original listing URL and visible provider attribution in clients. In particular,
 Remotive, Remote OK, Himalayas, Jobicy, RemoteJobs.org, Really Remote and RemoteFirstJobs publish
 specific attribution requirements; some restrict further redistribution to other aggregators.
-This is a personal discovery service. No resumes, AI matching, applications, MongoDB or Redis
-are involved, and collection does not bypass authentication, CAPTCHA or provider access limits.
+This is a personal discovery service. No resumes, AI matching, applications or MongoDB are involved, and collection does not bypass authentication, CAPTCHA or provider access limits.
 
 ## Development and verification
 
@@ -226,7 +232,10 @@ python3 -m venv .venv
 .venv/bin/pytest -q
 ```
 
-Or run all checks in Docker without installing Python:
+Tests start a private real Redis server (using `redis-server` if installed, otherwise Docker
+with `redis:8-alpine`). They never connect to your production Redis or hit job providers.
+
+Or run all checks in Docker without installing Python or Redis locally:
 
 ```bash
 docker build --target test -t job-agent-scraper:test .
@@ -237,7 +246,7 @@ Docker builds. For a matching local environment, install `-r requirements-dev.lo
 `pip install --no-deps -e .`. Re-resolve and test both lock files when changing dependencies.
 See [VALIDATION.md](VALIDATION.md) for completed checks and the verification results.
 
-To start outside Docker, export the two keys and run
+To start outside Docker, start Redis, export `API_KEY` (and optionally `MAX_REQ_PER_MIN`/`REDIS_URL`), and run
 `.venv/bin/uvicorn job_scraper.api:app --host 127.0.0.1 --port 8787`.
 Environment variables are read directly; local Uvicorn does not automatically load `.env`.
 `DATABASE_PATH` defaults to `data/jobs.sqlite3` outside Docker. Use **one worker and one replica**

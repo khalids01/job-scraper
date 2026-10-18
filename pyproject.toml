@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "job-agent-scraper"
-version = "0.2.1"
+version = "0.3.0"
 description = "Standalone job collection API for Job Agent"
 requires-python = ">=3.12"
 dependencies = [
@@ -14,6 +14,7 @@ dependencies = [
   "beautifulsoup4>=4.13,<5",
   "pydantic>=2.9,<3",
   "feedparser>=6.0,<7",
+  "redis>=5,<8",
 ]
 
 [project.optional-dependencies]

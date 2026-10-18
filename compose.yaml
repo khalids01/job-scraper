@@ -8,17 +8,17 @@ services:
       - "127.0.0.1:8787:8000"
     environment:
       API_KEY: ${API_KEY:?Set API_KEY in .env}
-      ADMIN_API_KEY: ${ADMIN_API_KEY:?Set ADMIN_API_KEY in .env}
-      API_RATE_LIMIT_PER_MINUTE: ${API_RATE_LIMIT_PER_MINUTE:-120}
-      ADMIN_RATE_LIMIT_PER_MINUTE: ${ADMIN_RATE_LIMIT_PER_MINUTE:-10}
-      AUTH_RATE_LIMIT_PER_MINUTE: ${AUTH_RATE_LIMIT_PER_MINUTE:-30}
-      IP_RATE_LIMIT_PER_MINUTE: ${IP_RATE_LIMIT_PER_MINUTE:-300}
+      MAX_REQ_PER_MIN: ${MAX_REQ_PER_MIN:-120}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       SOURCES: ${SOURCES:-remotive,arbeitnow,himalayas,remoteok,jobicy,workingnomads,reallyremote,remotejobsorg,weworkremotely,realworkfromanywhere,nodesk,jobspresso,authenticjobs,larajobs,vuejobs,wordpress,findjobit,cryptojobslist,cryptocurrencyjobs,fossjobs,landingjobs,hasjob,remotefirstjobs}
       SCRAPE_INTERVAL_SECONDS: ${SCRAPE_INTERVAL_SECONDS:-21600}
       MAX_JOBS: ${MAX_JOBS:-500}
       MAX_PAGES: ${MAX_PAGES:-5}
       SEARCH_TERMS: ${SEARCH_TERMS:-typescript,full stack,react,node.js,frontend}
       RETENTION_DAYS: ${RETENTION_DAYS:-90}
+    depends_on:
+      redis:
+        condition: service_healthy
     volumes:
       - scraper-data:/data
     read_only: true
@@ -37,5 +37,26 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always", "--maxmemory", "64mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    mem_limit: 192m
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
+  redis-data:
   scraper-data:

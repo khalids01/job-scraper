@@ -10,7 +10,6 @@ SOURCES = tuple(SPECS)
 @dataclass(frozen=True)
 class Settings:
     api_key: str = field(repr=False)
-    admin_key: str = field(repr=False)
     database: Path = Path("data/jobs.sqlite3")
     sources: tuple[str, ...] = SOURCES
     interval_seconds: int = 21600
@@ -21,17 +20,18 @@ class Settings:
     retention_days: int = 90
     search_terms: tuple[str, ...] = ("typescript", "full stack", "react", "node.js", "frontend")
     request_delay: float = 0.5
-    api_rate_limit_per_minute: int = 120
-    admin_rate_limit_per_minute: int = 10
-    auth_rate_limit_per_minute: int = 30
-    ip_rate_limit_per_minute: int = 300
-    rate_limit_max_clients: int = 4096
+    max_req_per_min: int = 120
+    redis_url: str = field(
+        default_factory=lambda: os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0"), repr=False
+    )
 
     def __post_init__(self):
-        if min(len(self.api_key), len(self.admin_key)) < 32:
-            raise ValueError("API_KEY and ADMIN_API_KEY must each contain at least 32 characters")
-        if self.api_key == self.admin_key:
-            raise ValueError("Use different read and admin API keys")
+        if len(self.api_key) < 32:
+            raise ValueError("API_KEY must contain at least 32 characters")
+        if not 1 <= self.max_req_per_min <= 100_000:
+            raise ValueError("MAX_REQ_PER_MIN must be 1..100000")
+        if not self.redis_url.startswith(("redis://", "rediss://", "unix://")):
+            raise ValueError("REDIS_URL must use redis://, rediss://, or unix://")
         if not self.sources or not set(self.sources) <= set(SOURCES):
             raise ValueError(f"SOURCES must be a nonempty subset of {SOURCES}")
         if self.interval_seconds < 21600:
@@ -50,23 +50,11 @@ class Settings:
             )
         if self.request_delay < 0:
             raise ValueError("Request delay must not be negative")
-        if any(
-            not 1 <= value <= 100_000
-            for value in (
-                self.api_rate_limit_per_minute,
-                self.admin_rate_limit_per_minute,
-                self.auth_rate_limit_per_minute,
-                self.ip_rate_limit_per_minute,
-                self.rate_limit_max_clients,
-            )
-        ):
-            raise ValueError("API rate limits and tracked-client capacity must be 1..100000")
 
     @classmethod
     def from_env(cls):
         return cls(
             api_key=os.environ.get("API_KEY", ""),
-            admin_key=os.environ.get("ADMIN_API_KEY", ""),
             database=Path(os.environ.get("DATABASE_PATH", "data/jobs.sqlite3")),
             sources=tuple(
                 dict.fromkeys(
@@ -79,11 +67,7 @@ class Settings:
             max_jobs=int(os.environ.get("MAX_JOBS", "500")),
             max_pages=int(os.environ.get("MAX_PAGES", "5")),
             retention_days=int(os.environ.get("RETENTION_DAYS", "90")),
-            api_rate_limit_per_minute=int(os.environ.get("API_RATE_LIMIT_PER_MINUTE", "120")),
-            admin_rate_limit_per_minute=int(os.environ.get("ADMIN_RATE_LIMIT_PER_MINUTE", "10")),
-            auth_rate_limit_per_minute=int(os.environ.get("AUTH_RATE_LIMIT_PER_MINUTE", "30")),
-            ip_rate_limit_per_minute=int(os.environ.get("IP_RATE_LIMIT_PER_MINUTE", "300")),
-            rate_limit_max_clients=int(os.environ.get("RATE_LIMIT_MAX_CLIENTS", "4096")),
+            max_req_per_min=int(os.environ.get("MAX_REQ_PER_MIN", "120")),
             search_terms=tuple(
                 dict.fromkeys(
                     s.strip()

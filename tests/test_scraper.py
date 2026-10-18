@@ -12,16 +12,12 @@ from job_scraper.service import CollectorService
 from job_scraper.storage import Store
 
 READ = "read-" + "a" * 40
-ADMIN = "admin-" + "b" * 40
 HEADERS = {"X-API-Key": READ}
-ADMIN_HEADERS = {"X-API-Key": ADMIN}
 
 
 @pytest.fixture
 def config(tmp_path):
-    return Settings(
-        api_key=READ, admin_key=ADMIN, database=tmp_path / "jobs.sqlite3", request_delay=0
-    )
+    return Settings(api_key=READ, database=tmp_path / "jobs.sqlite3", request_delay=0)
 
 
 def remotive(**overrides):
@@ -193,17 +189,15 @@ def test_api_auth_validation_and_contract(config):
                 client.get(endpoint, headers={"X-API-Key": "é".encode().hex()}).status_code == 401
             )
             assert client.get(endpoint, headers=HEADERS).status_code == 200
-        assert client.post("/v1/runs", headers=HEADERS, json={}).status_code == 403
+        assert client.post("/v1/runs", json={}).status_code == 401
         assert client.get("/v1/jobs?limit=201", headers=HEADERS).status_code == 422
         assert client.get("/v1/jobs?since=2026-01-01", headers=HEADERS).status_code == 422
         assert client.get("/v1/jobs/missing", headers=HEADERS).status_code == 404
         assert (
-            client.post(
-                "/v1/runs", headers=ADMIN_HEADERS, json={"sources": ["unsupported"]}
-            ).status_code
+            client.post("/v1/runs", headers=HEADERS, json={"sources": ["unsupported"]}).status_code
             == 422
         )
-        assert client.get("/v1/jobs", headers=ADMIN_HEADERS).json()["items"] == []
+        assert client.get("/v1/jobs", headers=HEADERS).json()["items"] == []
 
 
 def test_runs_partial_cooldown_recovery_and_cancellation(config):
@@ -245,16 +239,14 @@ def test_runs_partial_cooldown_recovery_and_cancellation(config):
 def test_api_run_and_persistence(config):
     transport = httpx.MockTransport(lambda _: response({"jobs": [remotive()]}))
     with TestClient(create_app(config, transport=transport, schedule=False)) as client:
-        result = client.post("/v1/runs", headers=ADMIN_HEADERS, json={"sources": ["remotive"]})
+        result = client.post("/v1/runs", headers=HEADERS, json={"sources": ["remotive"]})
         assert result.status_code == 202
         run_id = result.json()["id"]
         # TestClient portal waits on the actual worker, without timing-based polling.
         client.portal.call(lambda: client.app.state.service.active)
         assert client.get(f"/v1/runs/{run_id}", headers=HEADERS).json()["status"] == "completed"
         assert (
-            client.post(
-                "/v1/runs", headers=ADMIN_HEADERS, json={"sources": ["remotive"]}
-            ).status_code
+            client.post("/v1/runs", headers=HEADERS, json={"sources": ["remotive"]}).status_code
             == 429
         )
         jobs = client.get("/v1/jobs?q=React", headers=HEADERS).json()
@@ -301,7 +293,7 @@ def test_scheduler_collects_once_and_respects_persisted_cooldown(config):
         assert len(calls) == 1
 
 
-def test_admin_cancel_and_default_enabled_sources(config):
+def test_cancel_and_default_enabled_sources(config):
     async def slow(_):
         await asyncio.sleep(10)
         return response({"jobs": []})
@@ -309,18 +301,16 @@ def test_admin_cancel_and_default_enabled_sources(config):
     config = replace(config, sources=("remotive",))
     app = create_app(config, transport=httpx.MockTransport(slow), schedule=False)
     with TestClient(app) as client:
-        started = client.post("/v1/runs", headers=ADMIN_HEADERS, json={})
+        started = client.post("/v1/runs", headers=HEADERS, json={})
         assert started.status_code == 202
         run_id = started.json()["id"]
-        assert client.delete(f"/v1/runs/{run_id}", headers=HEADERS).status_code == 403
-        result = client.delete(f"/v1/runs/{run_id}", headers=ADMIN_HEADERS)
+        assert client.delete(f"/v1/runs/{run_id}").status_code == 401
+        result = client.delete(f"/v1/runs/{run_id}", headers=HEADERS)
         assert result.status_code == 200 and result.json()["status"] == "cancelled"
         assert result.json()["sources"] == ["remotive"]
-        assert client.delete(f"/v1/runs/{run_id}", headers=ADMIN_HEADERS).status_code == 409
+        assert client.delete(f"/v1/runs/{run_id}", headers=HEADERS).status_code == 409
         assert (
-            client.post(
-                "/v1/runs", headers=ADMIN_HEADERS, json={"sources": ["himalayas"]}
-            ).status_code
+            client.post("/v1/runs", headers=HEADERS, json={"sources": ["himalayas"]}).status_code
             == 422
         )
 

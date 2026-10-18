@@ -24,7 +24,6 @@ async def verify(args):
     with TemporaryDirectory(prefix="job-scraper-verify-") as directory:
         config = Settings(
             api_key="verification-read-" + "r" * 32,
-            admin_key="verification-admin-" + "a" * 32,
             database=Path(directory) / "jobs.sqlite3",
             max_pages=1,
             max_jobs=500,

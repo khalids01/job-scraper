@@ -5,10 +5,11 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.security import APIKeyHeader
+from redis.exceptions import RedisError
 
 from .config import Settings
 from .models import RunRequest, Source
-from .security import RateLimiter, RateLimitMiddleware, key_role
+from .security import RateLimitMiddleware, RedisRateLimiter, valid_key
 from .service import CollectorService
 from .sources import SPECS
 from .storage import Store
@@ -35,17 +36,25 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
             store.recover()
             service = CollectorService(store, config, transport)
             app.state.store, app.state.service, app.state.settings = store, service, config
-            app.state.limiter = RateLimiter(max_clients=config.rate_limit_max_clients)
+            app.state.limiter = RedisRateLimiter(config)
+            try:
+                await app.state.limiter.ping()
+            except RedisError:
+                await app.state.limiter.close()
+                raise RuntimeError("Redis is unavailable; check REDIS_URL") from None
             if schedule:
                 service.timer = asyncio.create_task(service.schedule())
             try:
                 yield
             finally:
-                await service.stop()
+                try:
+                    await service.stop()
+                finally:
+                    await app.state.limiter.close()
 
     app = FastAPI(
         title="Job Agent Scraper",
-        version="0.2.1",
+        version="0.3.0",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -54,21 +63,21 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
     app.add_middleware(RateLimitMiddleware, state=app.state)
 
     def authorize(key: Annotated[str | None, Depends(header)]):
-        if key_role(key, app.state.settings) is None:
+        if not valid_key(key, app.state.settings):
             raise HTTPException(401, "Invalid API key")
 
-    def admin(key: Annotated[str | None, Depends(header)]):
-        if key_role(key, app.state.settings) != "admin":
-            raise HTTPException(403, "Admin API key required")
-
     @app.get("/healthz")
-    def health():
+    async def health():
+        try:
+            await app.state.limiter.ping()
+        except RedisError:
+            raise HTTPException(503, "Redis unavailable") from None
         with app.state.store.connect() as db:
             db.execute("SELECT 1")
         timer = app.state.service.timer
         if schedule and timer and timer.done():
             raise HTTPException(503, "Scheduler stopped")
-        return {"status": "ok", "version": "0.2.1"}
+        return {"status": "ok", "version": "0.3.0"}
 
     @app.get("/v1/sources", dependencies=[Depends(authorize)])
     def sources():
@@ -151,7 +160,7 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
             raise HTTPException(404, "Run not found")
         return result
 
-    @app.post("/v1/runs", status_code=202, dependencies=[Depends(admin)])
+    @app.post("/v1/runs", status_code=202, dependencies=[Depends(authorize)])
     async def start_run(request: RunRequest):
         selected = (
             request.sources if request.sources is not None else list(app.state.settings.sources)
@@ -166,7 +175,7 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
             raise HTTPException(429, str(exc)) from None
         return {"id": run_id, "status": "running"}
 
-    @app.delete("/v1/runs/{run_id}", dependencies=[Depends(admin)])
+    @app.delete("/v1/runs/{run_id}", dependencies=[Depends(authorize)])
     async def cancel(run_id: str):
         service = app.state.service
         if service.run_id != run_id or not service.active or service.active.done():

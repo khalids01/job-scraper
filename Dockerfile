@@ -8,6 +8,8 @@ COPY src ./src
 RUN pip install --no-deps .
 
 FROM base AS test
+RUN apt-get update && apt-get install -y --no-install-recommends redis-server \
+    && rm -rf /var/lib/apt/lists/*
 COPY requirements-dev.lock ./
 RUN pip install -r requirements-dev.lock
 COPY tests ./tests
