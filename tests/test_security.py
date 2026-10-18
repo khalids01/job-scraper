@@ -13,7 +13,7 @@ from job_scraper.security import RedisRateLimiter
 
 @pytest.fixture
 def config(tmp_path):
-    return Settings(api_key="r" * 40, database=tmp_path / "jobs.sqlite3", max_req_per_min=3)
+    return Settings(api_key="r" * 40, max_req_per_min=3)
 
 
 def test_atomic_quota_and_concurrent_clients(config):
@@ -76,7 +76,7 @@ def test_single_key_headers_health_exemption_and_restart_persistence(config):
 
 def test_same_key_shares_quota_across_app_instances(config, tmp_path):
     first = create_app(config, schedule=False)
-    second = create_app(replace(config, database=tmp_path / "second.sqlite3"), schedule=False)
+    second = create_app(replace(config, mongodb_url=config.mongodb_url + "_second"), schedule=False)
     headers = {"X-API-Key": config.api_key}
     with TestClient(first) as a, TestClient(second) as b:
         assert a.get("/v1/jobs", headers=headers).status_code == 200

@@ -1,49 +1,74 @@
 # Job Agent Scraper
 
-A standalone Python service that collects public job feeds, persists normalized postings in SQLite,
+A standalone Python service that collects public job feeds, persists normalized postings in MongoDB,
 and serves only remote full-stack/frontend and JavaScript/TypeScript development matches through an authenticated API. Run the same Docker image locally or on
 a VPS. There are 23 reviewed JSON/RSS/Atom source adapters. No Python installation is needed on the desktop; desktop integration is a separate change.
 
-## Start with Docker
+## Deploy from GitHub in Dokploy
 
-```bash
-cp .env.example .env
+1. Create a **Docker Compose** service in your Dokploy project.
+2. Select the GitHub provider, repository `khalids01/job-scraper`, branch `main`,
+   and Compose Path `./compose.yaml`. Use Compose, not Docker Stack.
+3. In **Environment**, set the following and save:
+
+   ```dotenv
+   API_KEY=your-secret-key-at-least-32-characters
+   MAX_REQ_PER_MIN=120
+   MONGODB_URL=mongodb://USER:PASSWORD@HOST:27017/job_scraper?authSource=admin
+   REDIS_URL=redis://:PASSWORD@HOST:6379/0
+   ```
+
+   Generate an API key with `openssl rand -hex 32`. Use your own external MongoDB
+   and Redis connection URLs. `mongodb+srv://` and `rediss://` are supported.
+   Percent-encode special characters in URL credentials. The URI database is used;
+   if omitted, MongoDB defaults to `job_scraper`. The MongoDB account needs read/write
+   and index-creation permissions in that database. Both hosts must be reachable from
+   the scraper container; `localhost` refers to the scraper container itself.
+4. In **Domains**, select service `scraper`, container port `8000`, path `/`, and
+   your API hostname. Point its DNS A record to the VPS, enable HTTPS/Let's Encrypt.
+5. Click **Deploy**, check the logs, and request `https://YOUR_HOST/healthz`.
+   The first collection starts automatically; jobs may take a few minutes to appear.
+
+Compose builds the checked-out revision using the Dockerfile's `runtime` target.
+It does not wait for or depend on Docker Hub publication. GitHub Actions separately
+continues testing and publishing the same runtime image. The file contains no database
+containers, host port bindings, secrets, or local data volumes. Dokploy handles domain
+routing. Data persists in the external MongoDB/Redis services across deployments.
+Use **one worker and one replica** per MongoDB database, with stop-before-start
+replacement. A MongoDB lease rejects concurrent collectors; after an unclean exit,
+allow up to 60 seconds for the old lease to expire. If lease renewal fails, collection
+stops and health returns 503; restart the service after restoring connectivity.
+
+Official Dokploy instructions: [GitHub Compose setup](https://docs.dokploy.com/docs/core/docker-compose/example),
+[environment variables](https://docs.dokploy.com/docs/core/docker-compose),
+and [domain routing](https://docs.dokploy.com/docs/core/docker-compose/domains).
+
+### Local Docker
+
+Copy `.env.example` to `.env` and fill in the same four values. To publish a local
+port, create a `compose.local.yaml` override:
+
+```yaml
+services:
+  scraper:
+    ports:
+      - "127.0.0.1:8787:8000"
 ```
 
-Set just these two values in `.env`:
-
-```dotenv
-API_KEY=your-secret-key-at-least-32-characters
-MAX_REQ_PER_MIN=120
-```
-
-Generate a random key with `openssl rand -hex 32`. Docker Compose starts Redis and configures
-its internal connection automatically. There is one API key, one request quota, and no admin panel.
-
 ```bash
-docker compose up -d --build
+docker compose -f compose.yaml -f compose.local.yaml up -d --build
 curl http://127.0.0.1:8787/healthz
 ```
 
-Compose binds to **127.0.0.1:8787**. For a VPS, put an HTTPS reverse proxy in front of that local
-port, or access it through a private tunnel. Set the desktop's eventual base URL to that HTTPS
-address. Do not expose an unencrypted API key over the internet. HTTP on localhost is suitable
-for a local container. The container runs as an unprivileged user, with a read-only root filesystem.
+The container runs as an unprivileged user with a read-only root filesystem. Collection
+repeats every six hours. Source attempts are persisted before fetching, so failures,
+manual requests, and restarts respect the cooldown. There are no automatic retries of
+blocked, rate-limited, or failed source requests.
 
-Collection starts automatically for sources that have never been attempted, then repeats every
-six hours. Each source's last attempt is persisted **before** fetching; failed requests, manual
-requests, and container restarts all respect the same cooldown. Lower intervals are rejected.
-There are no automatic retries of blocked, rate-limited, or failed requests.
-
-```bash
-docker compose logs --tail=100 scraper
-docker compose down
-```
-
-The `scraper-data` named volume survives `down` and image rebuilds. `down -v` deletes the stored
-jobs, collection history, and Redis quota data. To back up a running database, use SQLite's backup API rather than
-copying only the database file while its WAL is active. Rotate keys by updating `.env` and running
-`docker compose up -d` again. Keep `.env` out of version control.
+Rotate `API_KEY` through your environment and redeploy. Keep `.env` out of version control.
+Back up MongoDB and enable Redis persistence in your external services. SQLite files from
+older versions are not automatically imported; the new MongoDB starts collecting fresh
+postings. Preserve any old SQLite volume if you still need its historical data.
 
 ## API
 
@@ -66,15 +91,12 @@ concurrent clients cannot exceed the configured allowance. Scraper process resta
 quota. Redis keys expire automatically after inactivity; the API key itself is never stored in
 Redis, only its SHA-256-derived identifier and event timestamps.
 
-Compose includes a private Redis service with a named volume and AOF persistence. It has no
-published port and no UI. Redis must be reachable before the scraper starts. If Redis goes down
-after startup, authenticated API requests return **503**, never an unmetered fallback; they
-recover when Redis becomes available. `/healthz` also reports 503 during a Redis outage.
-
-For an existing Redis deployment, optionally set `REDIS_URL`; Compose defaults to
-`redis://redis:6379/0`, while standalone Uvicorn defaults to `redis://127.0.0.1:6379/0`.
-`rediss://` and Unix socket URLs are supported. Multiple apps using the same API key/Redis share
-the quota; the collection/SQLite service still requires one worker per database.
+`REDIS_URL` is required in Compose and points to your external Redis service. Redis must
+be reachable at startup. Outages return **503**, never an unmetered fallback; quota requests
+recover when Redis becomes available. `/healthz` checks both MongoDB and Redis.
+`rediss://` and Unix socket URLs are supported. Multiple apps using the same API key/Redis
+share the quota; use separate MongoDB databases if running independent collectors.
+Enable Redis persistence to retain request windows across Redis restarts.
 
 When upgrading, retain your existing `API_KEY`, set `MAX_REQ_PER_MIN`, and remove the obsolete
 `ADMIN_API_KEY`, `API_RATE_LIMIT_PER_MINUTE`, `ADMIN_RATE_LIMIT_PER_MINUTE`,
@@ -115,7 +137,7 @@ fetch first, then stable ID. Offset pagination can shift during a collection; re
 zero after a run completes. `since` is an inclusive refresh filter, not an exactly-once change log.
 
 Only postings with a remote claim and a matching developer role appear in either job endpoint.
-Existing unrelated rows are preserved in SQLite but hidden after an automatic scope backfill.
+Out-of-scope postings are excluded from both job endpoints.
 
 Jobs contain stable `id`, `source`, `source_id`, `source_url`, title, company, location, remote
 claim with `remote_evidence`, plain-text description, original salary text where supplied, employment type, tags,
@@ -201,16 +223,17 @@ reviewed canonical feed hosts are configured directly. XML DTD/entity declaratio
 Recoverable malformed RSS is parsed with a visible warning, producing a `partial` run. HTML
 challenge pages and unusable feeds fail explicitly.
 
-Descriptions are plain text capped at 100,000 characters. A source batch is saved transactionally
-**after its pages complete**. Failure/cancellation discards that source's in-progress batch;
-completed sources stay available. Deduplication uses source plus source job ID, preserving the
+Descriptions are plain text capped at 100,000 characters. A source batch is upserted into MongoDB
+**after its pages complete**. Fetch failures/cancellation discard the in-progress fetch batch.
+Each job upsert is atomic; a database failure during a batch can leave partial job updates,
+which the next collection reconciles. Completed sources stay available. Deduplication uses source plus source job ID, preserving the
 first-seen time on upsert. Cross-source copies remain separate with their provenance.
 
 Configure `SOURCES`, `SEARCH_TERMS`, `SCRAPE_INTERVAL_SECONDS`, `MAX_JOBS`, `MAX_PAGES`, and
 `RETENTION_DAYS` in `.env`. **If you already have an `.env` listing only the original three sources,
 remove that line to use the expanded default; source IDs are listed above.**
-Run `docker compose up -d --build` after configuration changes. Existing unrelated database rows
-are hidden by a versioned scope migration; they are not deleted as part of this update.
+Redeploy after configuration changes. Existing MongoDB jobs are updated by stable source/job ID;
+first-seen timestamps are preserved.
 
 Retention removes jobs not fetched again within 90 days and old finished runs after collection.
 Only explicit source expiry dates are treated as closed. Bounded feeds are recent discovery
@@ -221,7 +244,7 @@ publication date. Older jobs in a feed may still be returned until they expire o
 Preserve the original listing URL and visible provider attribution in clients. In particular,
 Remotive, Remote OK, Himalayas, Jobicy, RemoteJobs.org, Really Remote and RemoteFirstJobs publish
 specific attribution requirements; some restrict further redistribution to other aggregators.
-This is a personal discovery service. No resumes, AI matching, applications or MongoDB are involved, and collection does not bypass authentication, CAPTCHA or provider access limits.
+This is a personal discovery service. No resumes, AI matching, or applications are involved, and collection does not bypass authentication, CAPTCHA or provider access limits.
 
 ## Development and verification
 
@@ -232,10 +255,11 @@ python3 -m venv .venv
 .venv/bin/pytest -q
 ```
 
-Tests start a private real Redis server (using `redis-server` if installed, otherwise Docker
-with `redis:8-alpine`). They never connect to your production Redis or hit job providers.
+Tests start private real MongoDB and Redis servers (using `mongod`/`redis-server` if installed,
+otherwise Docker with `mongo:7.0` and `redis:8-alpine`). Each test has its own MongoDB database.
+They ignore production connection variables and never hit job providers.
 
-Or run all checks in Docker without installing Python or Redis locally:
+Or run all checks in Docker without installing Python, MongoDB, or Redis locally:
 
 ```bash
 docker build --target test -t job-agent-scraper:test .
@@ -246,13 +270,11 @@ Docker builds. For a matching local environment, install `-r requirements-dev.lo
 `pip install --no-deps -e .`. Re-resolve and test both lock files when changing dependencies.
 See [VALIDATION.md](VALIDATION.md) for completed checks and the verification results.
 
-To start outside Docker, start Redis, export `API_KEY` (and optionally `MAX_REQ_PER_MIN`/`REDIS_URL`), and run
-`.venv/bin/uvicorn job_scraper.api:app --host 127.0.0.1 --port 8787`.
-Environment variables are read directly; local Uvicorn does not automatically load `.env`.
-`DATABASE_PATH` defaults to `data/jobs.sqlite3` outside Docker. Use **one worker and one replica**
-per database. A filesystem lock enforces this on Linux (VPS/local Docker); horizontal scaling
-requires a separate queue/database design. No public deployment or desktop connection is created
-by this repository.
+To start outside Docker, export `API_KEY`, `MONGODB_URL`, and `REDIS_URL` (optionally
+`MAX_REQ_PER_MIN`), then run `.venv/bin/uvicorn job_scraper.api:app --host 127.0.0.1 --port 8787`.
+Environment variables are read directly; Uvicorn does not automatically load `.env`.
+`DATABASE_PATH` is no longer used. No public deployment or desktop connection is created by
+this repository.
 
 Adapters were written afresh using the user's existing Joblake project as a field-mapping reference:
 `/home/khalid/Desktop/projects/saas/swiftcv/joblake`, revision

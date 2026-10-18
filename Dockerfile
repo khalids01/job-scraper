@@ -7,20 +7,24 @@ COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --no-deps .
 
+# Real MongoDB and Redis in the test image; neither is bundled in runtime.
 FROM base AS test
-RUN apt-get update && apt-get install -y --no-install-recommends redis-server \
+COPY --from=mongo:7.0 /usr/bin/mongod /usr/local/bin/mongod
+RUN apt-get update && apt-get install -y --no-install-recommends redis-server libcurl4t64 libssl3t64 liblzma5 libsasl2-2 libsnappy1v5 libzstd1 \
     && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
 COPY requirements-dev.lock ./
-RUN pip install -r requirements-dev.lock
+RUN pip install --no-cache-dir -r requirements-dev.lock
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install --no-deps .
 COPY tests ./tests
 COPY scripts ./scripts
 COPY .env.example compose.yaml ./
 RUN ruff check src tests scripts && pytest -q
 
 FROM base AS runtime
-RUN groupadd --gid 10001 scraper && useradd --uid 10001 --gid scraper --no-create-home scraper \
-    && mkdir /data && chown scraper:scraper /data
-ENV DATABASE_PATH=/data/jobs.sqlite3
+RUN groupadd --gid 10001 scraper && useradd --uid 10001 --gid scraper --no-create-home scraper
 USER scraper
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

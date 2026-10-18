@@ -1,165 +1,156 @@
-import json
-import sqlite3
-from contextlib import contextmanager
+"""MongoDB storage. Public documents retain the existing API's string IDs and timestamps."""
+
+import re
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from uuid import uuid4
+
+from pymongo import MongoClient, ReturnDocument, UpdateOne
+from pymongo.errors import DuplicateKeyError
 
 from .focus import in_scope
 from .models import Job, now
 
 
 class Store:
-    def __init__(self, path: Path):
-        self.path = path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as db:
-            db.executescript("""
-                PRAGMA journal_mode=WAL;
-                CREATE TABLE IF NOT EXISTS jobs (
-                    id TEXT PRIMARY KEY, source TEXT NOT NULL, source_id TEXT NOT NULL,
-                    title TEXT NOT NULL, company TEXT, location TEXT, remote INTEGER,
-                    published_at TEXT, expires_at TEXT, first_seen_at TEXT NOT NULL,
-                    fetched_at TEXT NOT NULL, document TEXT NOT NULL,
-                    UNIQUE(source, source_id)
-                );
-                CREATE INDEX IF NOT EXISTS jobs_fetched ON jobs(fetched_at DESC, id);
-                CREATE INDEX IF NOT EXISTS jobs_source ON jobs(source);
-                CREATE TABLE IF NOT EXISTS runs (
-                    id TEXT PRIMARY KEY, status TEXT NOT NULL, started_at TEXT NOT NULL,
-                    finished_at TEXT, sources TEXT NOT NULL, results TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS source_attempts (
-                    source TEXT PRIMARY KEY, attempted_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            """)
-            columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
-            if "eligible" not in columns:
-                db.execute("ALTER TABLE jobs ADD COLUMN eligible INTEGER NOT NULL DEFAULT 0")
-            version = db.execute(
-                "SELECT value FROM schema_meta WHERE key='focus_version'"
-            ).fetchone()
-            if version is None or version[0] != "remote-web-dev-v1":
-                # Preserve previous jobs; broad/onsite records stop appearing in the API.
-                rows = db.execute("SELECT id, document FROM jobs").fetchall()
-                for row in rows:
-                    job = Job.model_validate_json(row["document"])
-                    db.execute(
-                        "UPDATE jobs SET eligible=? WHERE id=?", (int(in_scope(job)), row["id"])
-                    )
-                db.execute(
-                    "INSERT OR REPLACE INTO schema_meta VALUES ('focus_version', 'remote-web-dev-v1')"
-                )
-
-    @contextmanager
-    def connect(self):
-        db = sqlite3.connect(self.path, timeout=10)
-        db.row_factory = sqlite3.Row
+    def __init__(self, url: str):
+        self.client = MongoClient(
+            url,
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+            socketTimeoutMS=10000,
+            timeoutMS=10000,
+        )
+        self.db = self.client.get_default_database(default="job_scraper")
+        self.owner = uuid4().hex
+        self.owns_lease = False
         try:
-            with db:
-                yield db
+            self.ping()
+            self.db.jobs.create_index([("source", 1), ("source_id", 1)], unique=True)
+            self.db.jobs.create_index([("eligible", 1), ("fetched_at", -1), ("id", 1)])
+            self.db.runs.create_index([("started_at", -1)])
+        except Exception:
+            self.client.close()
+            raise
+
+    def ping(self):
+        self.db.command("ping")
+
+    def acquire(self):
+        # Initialize separately: MongoDB disallows $expr in an upsert predicate.
+        # Only the conditional find-and-update below can acquire ownership.
+        try:
+            self.db.leases.update_one(
+                {"_id": "collector"},
+                {"$setOnInsert": {"owner": "", "expires_at": datetime(1970, 1, 1, tzinfo=UTC)}},
+                upsert=True,
+            )
+        except DuplicateKeyError:
+            pass  # A concurrent initializer created the same lease document.
+        document = self.db.leases.find_one_and_update(
+            {
+                "_id": "collector",
+                "$or": [
+                    {"owner": self.owner},
+                    {"$expr": {"$lte": ["$expires_at", "$$NOW"]}},
+                ],
+            },
+            [{"$set": {"owner": self.owner, "expires_at": {"$add": ["$$NOW", 60000]}}}],
+            return_document=ReturnDocument.AFTER,
+        )
+        if document is None:
+            raise RuntimeError("Database already in use; run exactly one server worker")
+        self.owns_lease = True
+
+    def renew(self):
+        result = self.db.leases.update_one(
+            {"_id": "collector", "owner": self.owner, "$expr": {"$gt": ["$expires_at", "$$NOW"]}},
+            [{"$set": {"expires_at": {"$add": ["$$NOW", 60000]}}}],
+        )
+        if result.matched_count != 1:
+            raise RuntimeError("Database ownership lost")
+
+    def close(self):
+        try:
+            if self.owns_lease:
+                self.db.leases.delete_one({"_id": "collector", "owner": self.owner})
         finally:
-            db.close()
+            self.client.close()
+
+    def check_owner(self):
+        if self.owns_lease:
+            self.renew()
 
     def recover(self):
-        with self.connect() as db:
-            db.execute(
-                "UPDATE runs SET status='interrupted', finished_at=? WHERE status='running'",
-                (now(),),
-            )
+        self.check_owner()
+        self.db.runs.update_many(
+            {"status": "running"}, {"$set": {"status": "interrupted", "finished_at": now()}}
+        )
 
     def start_run(self, sources: list[str]) -> str:
+        self.check_owner()
         run_id = uuid4().hex
-        with self.connect() as db:
-            db.execute(
-                "INSERT INTO runs VALUES (?, 'running', ?, NULL, ?, '{}')",
-                (run_id, now(), json.dumps(sources)),
-            )
+        self.db.runs.insert_one(
+            {
+                "_id": run_id,
+                "id": run_id,
+                "status": "running",
+                "started_at": now(),
+                "finished_at": None,
+                "sources": sources,
+                "results": {},
+            }
+        )
         return run_id
 
     def update_run(self, run_id: str, results: dict, status: str = "running"):
-        with self.connect() as db:
-            db.execute(
-                "UPDATE runs SET results=?, status=?, finished_at=? WHERE id=?",
-                (json.dumps(results), status, None if status == "running" else now(), run_id),
-            )
+        self.check_owner()
+        self.db.runs.update_one(
+            {"_id": run_id},
+            {
+                "$set": {
+                    "results": results,
+                    "status": status,
+                    "finished_at": None if status == "running" else now(),
+                }
+            },
+        )
 
     def runs(self, limit=20):
-        with self.connect() as db:
-            rows = db.execute("SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,))
-            return [self.decode_run(row) for row in rows]
-
-    @staticmethod
-    def decode_run(row):
-        return {
-            **dict(row),
-            "sources": json.loads(row["sources"]),
-            "results": json.loads(row["results"]),
-        }
+        return list(self.db.runs.find({}, {"_id": 0}).sort("started_at", -1).limit(limit))
 
     def run(self, run_id):
-        with self.connect() as db:
-            row = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-            return self.decode_run(row) if row else None
+        return self.db.runs.find_one({"_id": run_id}, {"_id": 0})
 
     def attempts(self) -> dict[str, str]:
-        with self.connect() as db:
-            return dict(db.execute("SELECT source, attempted_at FROM source_attempts"))
+        return {row["_id"]: row["attempted_at"] for row in self.db.source_attempts.find({})}
 
     def mark_attempt(self, source: str):
-        with self.connect() as db:
-            db.execute(
-                "INSERT INTO source_attempts VALUES (?, ?) ON CONFLICT(source) "
-                "DO UPDATE SET attempted_at=excluded.attempted_at",
-                (source, now()),
-            )
+        self.check_owner()
+        self.db.source_attempts.update_one(
+            {"_id": source}, {"$set": {"attempted_at": now()}}, upsert=True
+        )
 
     def save(self, jobs: list[Job]) -> dict:
-        inserted = 0
-        with self.connect() as db:
-            for job in jobs:
-                existing = db.execute(
-                    "SELECT first_seen_at FROM jobs WHERE id=?", (job.id,)
-                ).fetchone()
-                if existing:
-                    job = job.model_copy(update={"first_seen_at": existing[0]})
-                else:
-                    inserted += 1
-                db.execute(
-                    """INSERT INTO jobs
-                    (id, source, source_id, title, company, location, remote, published_at,
-                     expires_at, first_seen_at, fetched_at, document, eligible)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET title=excluded.title, company=excluded.company,
-                    location=excluded.location, remote=excluded.remote,
-                    published_at=excluded.published_at, expires_at=excluded.expires_at,
-                    fetched_at=excluded.fetched_at, document=excluded.document,
-                    eligible=excluded.eligible""",
-                    (
-                        job.id,
-                        job.source,
-                        job.source_id,
-                        job.title,
-                        job.company,
-                        job.location,
-                        job.remote,
-                        job.published_at,
-                        job.expires_at,
-                        job.first_seen_at,
-                        job.fetched_at,
-                        job.model_dump_json(),
-                        int(in_scope(job)),
-                    ),
+        self.check_owner()
+        operations = []
+        for job in jobs:
+            document = job.model_dump(mode="json")
+            first_seen = document.pop("first_seen_at")
+            operations.append(
+                UpdateOne(
+                    {"_id": job.id},
+                    {
+                        "$set": {**document, "eligible": in_scope(job)},
+                        "$setOnInsert": {"first_seen_at": first_seen},
+                    },
+                    upsert=True,
                 )
+            )
+        inserted = self.db.jobs.bulk_write(operations).upserted_count if operations else 0
         return {"inserted": inserted, "updated": len(jobs) - inserted}
 
     def job(self, job_id):
-        with self.connect() as db:
-            row = db.execute(
-                "SELECT document FROM jobs WHERE id=? AND eligible=1", (job_id,)
-            ).fetchone()
-            return json.loads(row[0]) if row else None
+        return self.db.jobs.find_one({"_id": job_id, "eligible": True}, {"_id": 0, "eligible": 0})
 
     def jobs(
         self,
@@ -172,41 +163,34 @@ class Store:
         offset=0,
         include_expired=False,
     ):
-        clauses, values = ["eligible=1"], []
+        clauses = [{"eligible": True}]
         for key, value in (("source", source), ("remote", remote)):
             if value is not None:
-                clauses.append(f"{key}=?")
-                values.append(value)
+                clauses.append({key: value})
         if q:
-            clauses.append(
-                "(instr(lower(title), lower(?)) > 0 OR "
-                "instr(lower(coalesce(company, '')), lower(?)) > 0)"
-            )
-            values.extend([q, q])
+            # Search text is literal, never a caller-supplied regex/operator.
+            pattern = {"$regex": re.escape(q), "$options": "i"}
+            clauses.append({"$or": [{"title": pattern}, {"company": pattern}]})
         if since:
-            clauses.append("fetched_at>=?")
-            values.append(since)
+            clauses.append({"fetched_at": {"$gte": since}})
         if not include_expired:
-            clauses.append("(expires_at IS NULL OR expires_at>?)")
-            values.append(now())
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        with self.connect() as db:
-            total = db.execute("SELECT count(*) FROM jobs" + where, values).fetchone()[0]
-            rows = db.execute(
-                "SELECT document FROM jobs"
-                + where
-                + " ORDER BY fetched_at DESC, id LIMIT ? OFFSET ?",
-                [*values, limit, offset],
-            )
-            return {
-                "items": [json.loads(row[0]) for row in rows],
-                "total": total,
-                "limit": limit,
-                "offset": offset,
-            }
+            clauses.append({"$or": [{"expires_at": None}, {"expires_at": {"$gt": now()}}]})
+        query = {"$and": clauses}
+        items = (
+            self.db.jobs.find(query, {"_id": 0, "eligible": 0})
+            .sort([("fetched_at", -1), ("id", 1)])
+            .skip(offset)
+            .limit(limit)
+        )
+        return {
+            "items": list(items),
+            "total": self.db.jobs.count_documents(query),
+            "limit": limit,
+            "offset": offset,
+        }
 
     def prune(self, retention_days):
+        self.check_owner()
         cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat()
-        with self.connect() as db:
-            db.execute("DELETE FROM jobs WHERE fetched_at<?", (cutoff,))
-            db.execute("DELETE FROM runs WHERE finished_at<?", (cutoff,))
+        self.db.jobs.delete_many({"fetched_at": {"$lt": cutoff}})
+        self.db.runs.delete_many({"finished_at": {"$type": "string", "$lt": cutoff}})

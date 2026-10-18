@@ -1,10 +1,11 @@
-import fcntl
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.security import APIKeyHeader
+from pymongo.errors import PyMongoError
 from redis.exceptions import RedisError
 
 from .config import Settings
@@ -20,41 +21,60 @@ header = APIKeyHeader(name="X-API-Key", auto_error=False)
 def create_app(settings: Settings | None = None, *, transport=None, schedule=True):
     @asynccontextmanager
     async def lifespan(app):
-        import asyncio
-
         config = settings or Settings.from_env()
-        config.database.parent.mkdir(parents=True, exist_ok=True)
-        # A single process owns scheduling and SQLite writes. Fail fast on --workers > 1.
-        with open(str(config.database) + ".lock", "a") as lock:
+        try:
+            store = await asyncio.to_thread(Store, config.mongodb_url)
+        except PyMongoError:
+            raise RuntimeError("MongoDB is unavailable; check MONGODB_URL") from None
+        limiter = RedisRateLimiter(config)
+        lease_task = None
+        service = None
+        try:
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise RuntimeError(
-                    "Database already in use; run exactly one server worker"
-                ) from None
-            store = Store(config.database)
-            store.recover()
+                await asyncio.to_thread(store.acquire)
+                await asyncio.to_thread(store.recover)
+            except PyMongoError:
+                raise RuntimeError("MongoDB is unavailable; check MONGODB_URL") from None
             service = CollectorService(store, config, transport)
             app.state.store, app.state.service, app.state.settings = store, service, config
-            app.state.limiter = RedisRateLimiter(config)
+            app.state.limiter = limiter
+            app.state.database_ready = True
             try:
-                await app.state.limiter.ping()
+                await limiter.ping()
             except RedisError:
-                await app.state.limiter.close()
                 raise RuntimeError("Redis is unavailable; check REDIS_URL") from None
+
+            async def maintain_lease():
+                while True:
+                    await asyncio.sleep(10)
+                    try:
+                        await asyncio.to_thread(store.renew)
+                    except (PyMongoError, RuntimeError):
+                        app.state.database_ready = False
+                        # Stop source requests immediately if ownership cannot be verified.
+                        await service.stop()
+                        return
+
+            lease_task = asyncio.create_task(maintain_lease())
             if schedule:
                 service.timer = asyncio.create_task(service.schedule())
+            yield
+        finally:
+            if lease_task:
+                lease_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await lease_task
             try:
-                yield
-            finally:
-                try:
+                if service:
                     await service.stop()
-                finally:
-                    await app.state.limiter.close()
+            finally:
+                await limiter.close()
+                with suppress(PyMongoError):
+                    await asyncio.to_thread(store.close)
 
     app = FastAPI(
         title="Job Agent Scraper",
-        version="0.3.0",
+        version="0.4.0",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -62,9 +82,17 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
     )
     app.add_middleware(RateLimitMiddleware, state=app.state)
 
+    @app.exception_handler(PyMongoError)
+    async def database_error(request, exc):
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=503, content={"detail": "MongoDB unavailable"})
+
     def authorize(key: Annotated[str | None, Depends(header)]):
         if not valid_key(key, app.state.settings):
             raise HTTPException(401, "Invalid API key")
+        if not app.state.database_ready:
+            raise HTTPException(503, "Database ownership unavailable; restart the service")
 
     @app.get("/healthz")
     async def health():
@@ -72,12 +100,16 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
             await app.state.limiter.ping()
         except RedisError:
             raise HTTPException(503, "Redis unavailable") from None
-        with app.state.store.connect() as db:
-            db.execute("SELECT 1")
+        if not app.state.database_ready:
+            raise HTTPException(503, "Database ownership unavailable; restart the service")
+        try:
+            await asyncio.to_thread(app.state.store.ping)
+        except PyMongoError:
+            raise HTTPException(503, "MongoDB unavailable") from None
         timer = app.state.service.timer
         if schedule and timer and timer.done():
             raise HTTPException(503, "Scheduler stopped")
-        return {"status": "ok", "version": "0.3.0"}
+        return {"status": "ok", "version": "0.4.0"}
 
     @app.get("/v1/sources", dependencies=[Depends(authorize)])
     def sources():
@@ -181,8 +213,6 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
         if service.run_id != run_id or not service.active or service.active.done():
             raise HTTPException(409, "Run is not active in this process")
         service.active.cancel()
-        import asyncio
-        from contextlib import suppress
 
         with suppress(asyncio.CancelledError):
             await service.active

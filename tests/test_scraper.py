@@ -17,7 +17,7 @@ HEADERS = {"X-API-Key": READ}
 
 @pytest.fixture
 def config(tmp_path):
-    return Settings(api_key=READ, database=tmp_path / "jobs.sqlite3", request_delay=0)
+    return Settings(api_key=READ, request_delay=0)
 
 
 def remotive(**overrides):
@@ -156,7 +156,7 @@ def test_bounded_responses_and_results(config):
 
 
 def test_storage_upsert_filter_and_retention(config):
-    store = Store(config.database)
+    store = Store(config.mongodb_url)
     job = normalize("remotive", remotive())
     assert store.save([job]) == {"inserted": 1, "updated": 0}
     updated = job.model_copy(update={"title": "Senior React Engineer", "first_seen_at": "later"})
@@ -207,7 +207,7 @@ def test_runs_partial_cooldown_recovery_and_cancellation(config):
                 return response({"jobs": [remotive()]})
             return httpx.Response(429)
 
-        store = Store(config.database)
+        store = Store(config.mongodb_url)
         service = CollectorService(store, config, httpx.MockTransport(handler))
         run_id = service.start(["remotive", "arbeitnow"])
         with pytest.raises(RuntimeError):
@@ -217,7 +217,7 @@ def test_runs_partial_cooldown_recovery_and_cancellation(config):
         assert result["status"] == "partial"
         assert result["results"]["remotive"]["inserted"] == 1
         assert "429" in result["results"]["arbeitnow"]["error"]
-        restarted = CollectorService(Store(config.database), config)
+        restarted = CollectorService(Store(config.mongodb_url), config)
         with pytest.raises(ValueError, match="cooling down"):
             restarted.start(["remotive"])
         broken_id = store.start_run(["himalayas"])
@@ -321,7 +321,7 @@ def test_total_source_timeout_is_recorded(config):
 
     async def run():
         service = CollectorService(
-            Store(config.database), replace(config, source_timeout=0.01), httpx.MockTransport(slow)
+            Store(config.mongodb_url), replace(config, source_timeout=0.01), httpx.MockTransport(slow)
         )
         run_id = service.start(["remotive"])
         await service.active

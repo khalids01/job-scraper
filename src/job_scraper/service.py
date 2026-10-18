@@ -4,6 +4,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 
 import httpx
+from pymongo.errors import PyMongoError
 
 from .collectors import SourceError, collect
 from .config import Settings
@@ -54,13 +55,13 @@ class CollectorService:
             ) as client:
                 for source in sources:
                     # Persist before the request so restarting cannot evade cooldown.
-                    self.store.mark_attempt(source)
+                    await asyncio.to_thread(self.store.mark_attempt, source)
                     results[source] = {"status": "running"}
-                    self.store.update_run(run_id, results)
+                    await asyncio.to_thread(self.store.update_run, run_id, results)
                     try:
                         async with asyncio.timeout(self.settings.source_timeout):
                             batch = await collect(source, client, self.settings)
-                        counts = self.store.save(batch.jobs)
+                        counts = await asyncio.to_thread(self.store.save, batch.jobs)
                         stats = {key: value for key, value in vars(batch).items() if key != "jobs"}
                         results[source] = {
                             "status": "completed",
@@ -73,7 +74,7 @@ class CollectorService:
                             "status": "failed",
                             "error": str(exc) or "Source timeout",
                         }
-                    self.store.update_run(run_id, results)
+                    await asyncio.to_thread(self.store.update_run, run_id, results)
             failed = sum(result["status"] == "failed" for result in results.values())
             degraded = any(
                 r.get("truncated") or r.get("invalid") or r.get("parser_warnings")
@@ -86,19 +87,21 @@ class CollectorService:
                 if failed or degraded
                 else "completed"
             )
-            self.store.update_run(run_id, results, status)
-            self.store.prune(self.settings.retention_days)
+            await asyncio.to_thread(self.store.update_run, run_id, results, status)
+            await asyncio.to_thread(self.store.prune, self.settings.retention_days)
         except asyncio.CancelledError:
             for result in results.values():
                 if result["status"] == "running":
                     result["status"] = "cancelled"
-            self.store.update_run(run_id, results, "cancelled")
+            with suppress(PyMongoError, RuntimeError):
+                await asyncio.to_thread(self.store.update_run, run_id, results, "cancelled")
             raise
         except Exception:
             # Never serialize exception text: URLs or configuration may contain secrets.
             log.error("Collection failed unexpectedly; run=%s", run_id)
             results["service"] = {"status": "failed", "error": "Internal collection failure"}
-            self.store.update_run(run_id, results, "failed")
+            with suppress(PyMongoError, RuntimeError):
+                await asyncio.to_thread(self.store.update_run, run_id, results, "failed")
 
     async def schedule(self):
         while True:
@@ -112,9 +115,12 @@ class CollectorService:
         for task in (self.timer, self.active):
             if task and not task.done():
                 task.cancel()
-                with suppress(asyncio.CancelledError):
+                with suppress(asyncio.CancelledError, PyMongoError):
                     await task
         if self.run_id:
-            run = self.store.run(self.run_id)
-            if run and run["status"] == "running":
-                self.store.update_run(self.run_id, run["results"], "cancelled")
+            with suppress(PyMongoError, RuntimeError):
+                run = await asyncio.to_thread(self.store.run, self.run_id)
+                if run and run["status"] == "running":
+                    await asyncio.to_thread(
+                        self.store.update_run, self.run_id, run["results"], "cancelled"
+                    )

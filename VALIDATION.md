@@ -1,3 +1,31 @@
+# Verification — 2026-10-19, version 0.4.0
+
+This version replaces SQLite with external MongoDB. Historical SQLite/embedded-Redis notes below
+refer to older versions; current deployment uses the supplied `MONGODB_URL` and `REDIS_URL`.
+
+- **113 tests passed** on host Python 3.14 and in the Python 3.12 Docker test target, against
+  private real MongoDB 7.0 and Redis servers. No production URLs or job providers were used.
+- Storage checks cover unique source IDs, first-seen preservation, literal text search,
+  filtering/pagination, expiry/retention, run history, interrupted-run recovery, and source
+  cooldown persistence. MongoDB lease tests cover competing collectors, expiry/takeover,
+  renewal, rejected stale-owner writes, and safe cleanup after ownership changes.
+- API checks cover MongoDB/Redis failure responses without credential disclosure, API-key
+  authentication, shared Redis quotas, restart persistence, collection and cancellation.
+- Ruff checks, formatting checks for changed Python files, `pip check`, `git diff --check`, and
+  Compose configuration validation with nonsecret placeholders passed.
+- Both Docker `test` and `runtime` targets built successfully. MongoDB/Redis server binaries
+  exist only in the test image; the runtime connects to external services.
+- A separate container smoke test ran the unprivileged runtime with a read-only filesystem and
+  private external MongoDB/Redis containers. Seeded scoped jobs and persisted source cooldowns
+  avoided live scraping. Health, missing-key 401, job reads, 200/200/429 quota behavior and quota
+  persistence across app restart passed. Temporary containers, anonymous volumes and network
+  were removed afterward.
+- MongoDB 8.0 could not start on this host's Linux 7.0.0 kernel due to MongoDB's documented
+  allocator incompatibility. Test fixtures therefore use MongoDB 7.0; runtime does not launch
+  MongoDB or require changes to the user's external database service.
+- Existing SQLite files are not automatically imported. MongoDB collects fresh jobs; preserve
+  old volumes separately if historical data is needed. No Dokploy deployment was performed.
+
 # Verification — 2026-10-18, version 0.2.0
 
 All checks used the standalone `job-scraper` repository. Job Agent, the original Joblake project,

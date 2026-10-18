@@ -1,6 +1,5 @@
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from .sources import SPECS
 
@@ -10,7 +9,9 @@ SOURCES = tuple(SPECS)
 @dataclass(frozen=True)
 class Settings:
     api_key: str = field(repr=False)
-    database: Path = Path("data/jobs.sqlite3")
+    mongodb_url: str = field(
+        default_factory=lambda: os.environ.get("MONGODB_URL", ""), repr=False
+    )
     sources: tuple[str, ...] = SOURCES
     interval_seconds: int = 21600
     max_jobs: int = 500
@@ -26,6 +27,8 @@ class Settings:
     )
 
     def __post_init__(self):
+        if not self.mongodb_url.startswith(("mongodb://", "mongodb+srv://")):
+            raise ValueError("MONGODB_URL must use mongodb:// or mongodb+srv://")
         if len(self.api_key) < 32:
             raise ValueError("API_KEY must contain at least 32 characters")
         if not 1 <= self.max_req_per_min <= 100_000:
@@ -55,7 +58,6 @@ class Settings:
     def from_env(cls):
         return cls(
             api_key=os.environ.get("API_KEY", ""),
-            database=Path(os.environ.get("DATABASE_PATH", "data/jobs.sqlite3")),
             sources=tuple(
                 dict.fromkeys(
                     s.strip()

@@ -19,7 +19,7 @@ from job_scraper.storage import Store
 
 @pytest.fixture
 def config(tmp_path):
-    return Settings(api_key="r" * 40, database=tmp_path / "jobs.sqlite3", request_delay=0)
+    return Settings(api_key="r" * 40, request_delay=0)
 
 
 def sample(**changes):
@@ -337,19 +337,15 @@ def test_scoping_counts_and_unknown_remote_are_explicit(config):
     asyncio.run(run())
 
 
-def test_legacy_database_backfill_hides_unrelated_without_deleting(config):
-    store = Store(config.database)
+def test_database_hides_unrelated_without_deleting(config):
+    store = Store(config.mongodb_url)
     relevant = normalize("remotive", sample())
     unrelated = normalize("remotive", sample(id=2, title="Nurse"))
     store.save([relevant, unrelated])
-    with store.connect() as db:
-        db.execute("ALTER TABLE jobs DROP COLUMN eligible")
-        db.execute("DELETE FROM schema_meta WHERE key='focus_version'")
-    migrated = Store(config.database)
+    migrated = Store(config.mongodb_url)
     assert migrated.jobs()["total"] == 1
     assert migrated.job(unrelated.id) is None
-    with migrated.connect() as db:
-        assert db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 2
+    assert migrated.db.jobs.count_documents({}) == 2
     app = create_app(config, schedule=False)
     with TestClient(app) as client:
         assert (
