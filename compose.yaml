@@ -1,0 +1,36 @@
+services:
+  scraper:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8000"
+    environment:
+      API_KEY: ${API_KEY:?Set API_KEY in .env}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?Set ADMIN_API_KEY in .env}
+      SOURCES: ${SOURCES:-remotive,arbeitnow,himalayas}
+      SCRAPE_INTERVAL_SECONDS: ${SCRAPE_INTERVAL_SECONDS:-21600}
+      MAX_JOBS: ${MAX_JOBS:-500}
+      MAX_PAGES: ${MAX_PAGES:-5}
+      RETENTION_DAYS: ${RETENTION_DAYS:-90}
+    volumes:
+      - scraper-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  scraper-data:

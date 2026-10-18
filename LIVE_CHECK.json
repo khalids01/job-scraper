@@ -1,0 +1,54 @@
+{
+  "checked_at": "2026-10-18T11:42:06.080396+00:00",
+  "limits": {
+    "max_pages": 1,
+    "max_jobs": 100
+  },
+  "run": {
+    "id": "037a41ff7b714d84b58b23fd8f81e4a5",
+    "status": "partial",
+    "started_at": "2026-10-18T11:42:03.401653+00:00",
+    "finished_at": "2026-10-18T11:42:06.080396+00:00",
+    "sources": [
+      "remotive",
+      "arbeitnow",
+      "himalayas"
+    ],
+    "results": {
+      "remotive": {
+        "status": "completed",
+        "accepted": 12,
+        "fetched": 12,
+        "invalid": 0,
+        "duplicates": 0,
+        "truncated": false,
+        "requests": 1,
+        "inserted": 12,
+        "updated": 0
+      },
+      "arbeitnow": {
+        "status": "completed",
+        "accepted": 100,
+        "fetched": 300,
+        "invalid": 0,
+        "duplicates": 0,
+        "truncated": true,
+        "requests": 1,
+        "inserted": 100,
+        "updated": 0
+      },
+      "himalayas": {
+        "status": "completed",
+        "accepted": 20,
+        "fetched": 20,
+        "invalid": 0,
+        "duplicates": 0,
+        "truncated": true,
+        "requests": 1,
+        "inserted": 20,
+        "updated": 0
+      }
+    }
+  },
+  "stored_jobs": 132
+}
