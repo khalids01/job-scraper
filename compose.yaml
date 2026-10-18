@@ -9,10 +9,11 @@ services:
     environment:
       API_KEY: ${API_KEY:?Set API_KEY in .env}
       ADMIN_API_KEY: ${ADMIN_API_KEY:?Set ADMIN_API_KEY in .env}
-      SOURCES: ${SOURCES:-remotive,arbeitnow,himalayas}
+      SOURCES: ${SOURCES:-remotive,arbeitnow,himalayas,remoteok,jobicy,workingnomads,reallyremote,remotejobsorg,weworkremotely,realworkfromanywhere,nodesk,jobspresso,authenticjobs,larajobs,vuejobs,wordpress,findjobit,cryptojobslist,cryptocurrencyjobs,fossjobs,landingjobs,hasjob,remotefirstjobs}
       SCRAPE_INTERVAL_SECONDS: ${SCRAPE_INTERVAL_SECONDS:-21600}
       MAX_JOBS: ${MAX_JOBS:-500}
       MAX_PAGES: ${MAX_PAGES:-5}
+      SEARCH_TERMS: ${SEARCH_TERMS:-typescript,full stack,react,node.js,frontend}
       RETENTION_DAYS: ${RETENTION_DAYS:-90}
     volumes:
       - scraper-data:/data

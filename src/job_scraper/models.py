@@ -1,11 +1,10 @@
 from datetime import UTC, datetime
-from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field, field_validator
 
-Source = Literal["remotive", "arbeitnow", "himalayas"]
+from .sources import SPECS, Source
 
 
 def now() -> str:
@@ -40,6 +39,7 @@ class Job(BaseModel):
     company: str | None = Field(default=None, max_length=1000)
     location: str | None = Field(default=None, max_length=2000)
     remote: bool | None = None
+    remote_evidence: str | None = None
     description: str = Field(default="", max_length=100_000)
     salary_text: str | None = Field(default=None, max_length=2000)
     employment_type: str | None = None
@@ -66,4 +66,4 @@ class Job(BaseModel):
 
 
 class RunRequest(BaseModel):
-    sources: list[Source] | None = Field(default=None, min_length=1, max_length=3)
+    sources: list[Source] | None = Field(default=None, min_length=1, max_length=len(SPECS))

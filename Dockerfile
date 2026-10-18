@@ -11,7 +11,9 @@ FROM base AS test
 COPY requirements-dev.lock ./
 RUN pip install -r requirements-dev.lock
 COPY tests ./tests
-RUN ruff check src tests && pytest -q
+COPY scripts ./scripts
+COPY .env.example compose.yaml ./
+RUN ruff check src tests scripts && pytest -q
 
 FROM base AS runtime
 RUN groupadd --gid 10001 scraper && useradd --uid 10001 --gid scraper --no-create-home scraper \

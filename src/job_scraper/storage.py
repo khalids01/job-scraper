@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+from .focus import in_scope
 from .models import Job, now
 
 
@@ -31,7 +32,25 @@ class Store:
                 CREATE TABLE IF NOT EXISTS source_attempts (
                     source TEXT PRIMARY KEY, attempted_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
+            if "eligible" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN eligible INTEGER NOT NULL DEFAULT 0")
+            version = db.execute(
+                "SELECT value FROM schema_meta WHERE key='focus_version'"
+            ).fetchone()
+            if version is None or version[0] != "remote-web-dev-v1":
+                # Preserve previous jobs; broad/onsite records stop appearing in the API.
+                rows = db.execute("SELECT id, document FROM jobs").fetchall()
+                for row in rows:
+                    job = Job.model_validate_json(row["document"])
+                    db.execute(
+                        "UPDATE jobs SET eligible=? WHERE id=?", (int(in_scope(job)), row["id"])
+                    )
+                db.execute(
+                    "INSERT OR REPLACE INTO schema_meta VALUES ('focus_version', 'remote-web-dev-v1')"
+                )
 
     @contextmanager
     def connect(self):
@@ -108,11 +127,15 @@ class Store:
                 else:
                     inserted += 1
                 db.execute(
-                    """INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """INSERT INTO jobs
+                    (id, source, source_id, title, company, location, remote, published_at,
+                     expires_at, first_seen_at, fetched_at, document, eligible)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET title=excluded.title, company=excluded.company,
                     location=excluded.location, remote=excluded.remote,
                     published_at=excluded.published_at, expires_at=excluded.expires_at,
-                    fetched_at=excluded.fetched_at, document=excluded.document""",
+                    fetched_at=excluded.fetched_at, document=excluded.document,
+                    eligible=excluded.eligible""",
                     (
                         job.id,
                         job.source,
@@ -126,13 +149,16 @@ class Store:
                         job.first_seen_at,
                         job.fetched_at,
                         job.model_dump_json(),
+                        int(in_scope(job)),
                     ),
                 )
         return {"inserted": inserted, "updated": len(jobs) - inserted}
 
     def job(self, job_id):
         with self.connect() as db:
-            row = db.execute("SELECT document FROM jobs WHERE id=?", (job_id,)).fetchone()
+            row = db.execute(
+                "SELECT document FROM jobs WHERE id=? AND eligible=1", (job_id,)
+            ).fetchone()
             return json.loads(row[0]) if row else None
 
     def jobs(
@@ -146,7 +172,7 @@ class Store:
         offset=0,
         include_expired=False,
     ):
-        clauses, values = [], []
+        clauses, values = ["eligible=1"], []
         for key, value in (("source", source), ("remote", remote)):
             if value is not None:
                 clauses.append(f"{key}=?")

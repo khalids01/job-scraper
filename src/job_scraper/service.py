@@ -47,8 +47,8 @@ class CollectorService:
                 timeout=httpx.Timeout(25, connect=10),
                 follow_redirects=False,
                 headers={
-                    "User-Agent": "JobAgentScraper/0.1 (personal job discovery)",
-                    "Accept": "application/json",
+                    "User-Agent": "JobAgentScraper/0.2 (personal remote developer discovery)",
+                    "Accept": "application/json, application/rss+xml, application/atom+xml, application/xml, text/xml",
                 },
                 transport=self.transport,
             ) as client:
@@ -75,7 +75,10 @@ class CollectorService:
                         }
                     self.store.update_run(run_id, results)
             failed = sum(result["status"] == "failed" for result in results.values())
-            degraded = any(r.get("truncated") or r.get("invalid") for r in results.values())
+            degraded = any(
+                r.get("truncated") or r.get("invalid") or r.get("parser_warnings")
+                for r in results.values()
+            )
             status = (
                 "failed"
                 if failed == len(sources)

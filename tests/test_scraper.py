@@ -19,7 +19,9 @@ ADMIN_HEADERS = {"X-API-Key": ADMIN}
 
 @pytest.fixture
 def config(tmp_path):
-    return Settings(api_key=READ, admin_key=ADMIN, database=tmp_path / "jobs.sqlite3")
+    return Settings(
+        api_key=READ, admin_key=ADMIN, database=tmp_path / "jobs.sqlite3", request_delay=0
+    )
 
 
 def remotive(**overrides):
@@ -81,7 +83,12 @@ def test_pagination_dedup_and_invalid_records(config):
             return response(
                 {
                     "data": [
-                        {"slug": "a", "title": "One", "url": "https://e.com/a"},
+                        {
+                            "slug": "a",
+                            "title": "Full Stack Developer",
+                            "url": "https://e.com/a",
+                            "remote": True,
+                        },
                         {"slug": "invalid"},
                     ],
                     "links": {"next": "https://evil.test"},
@@ -90,8 +97,18 @@ def test_pagination_dedup_and_invalid_records(config):
         return response(
             {
                 "data": [
-                    {"slug": "a", "title": "One", "url": "https://e.com/a"},
-                    {"slug": "b", "title": "Two", "url": "https://e.com/b"},
+                    {
+                        "slug": "a",
+                        "title": "Full Stack Developer",
+                        "url": "https://e.com/a",
+                        "remote": True,
+                    },
+                    {
+                        "slug": "b",
+                        "title": "React Engineer",
+                        "url": "https://e.com/b",
+                        "remote": True,
+                    },
                 ],
                 "links": {"next": None},
             }
@@ -146,7 +163,7 @@ def test_storage_upsert_filter_and_retention(config):
     store = Store(config.database)
     job = normalize("remotive", remotive())
     assert store.save([job]) == {"inserted": 1, "updated": 0}
-    updated = job.model_copy(update={"title": "Senior Engineer", "first_seen_at": "later"})
+    updated = job.model_copy(update={"title": "Senior React Engineer", "first_seen_at": "later"})
     assert store.save([updated]) == {"inserted": 0, "updated": 1}
     assert store.job(job.id)["first_seen_at"] == job.first_seen_at
     assert store.jobs(q="senior", remote=True)["total"] == 1

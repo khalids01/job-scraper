@@ -2,7 +2,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-SOURCES = ("remotive", "arbeitnow", "himalayas")
+from .sources import SPECS
+
+SOURCES = tuple(SPECS)
 
 
 @dataclass(frozen=True)
@@ -17,6 +19,8 @@ class Settings:
     max_response_bytes: int = 16_000_000
     source_timeout: float = 90
     retention_days: int = 90
+    search_terms: tuple[str, ...] = ("typescript", "full stack", "react", "node.js", "frontend")
+    request_delay: float = 0.5
 
     def __post_init__(self):
         if min(len(self.api_key), len(self.admin_key)) < 32:
@@ -31,6 +35,16 @@ class Settings:
             raise ValueError("MAX_JOBS must be 1..5000; MAX_PAGES must be 1..25")
         if self.retention_days < 1 or self.source_timeout <= 0 or self.max_response_bytes < 1:
             raise ValueError("Retention, timeout and response limit must be positive")
+        if (
+            not self.search_terms
+            or len(self.search_terms) > 12
+            or any(not term.strip() or len(term) > 80 for term in self.search_terms)
+        ):
+            raise ValueError(
+                "SEARCH_TERMS must contain 1..12 nonempty terms of at most 80 characters"
+            )
+        if self.request_delay < 0:
+            raise ValueError("Request delay must not be negative")
 
     @classmethod
     def from_env(cls):
@@ -49,4 +63,13 @@ class Settings:
             max_jobs=int(os.environ.get("MAX_JOBS", "500")),
             max_pages=int(os.environ.get("MAX_PAGES", "5")),
             retention_days=int(os.environ.get("RETENTION_DAYS", "90")),
+            search_terms=tuple(
+                dict.fromkeys(
+                    s.strip()
+                    for s in os.environ.get(
+                        "SEARCH_TERMS", "typescript,full stack,react,node.js,frontend"
+                    ).split(",")
+                    if s.strip()
+                )
+            ),
         )

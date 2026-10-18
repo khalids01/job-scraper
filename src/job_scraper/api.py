@@ -10,6 +10,7 @@ from fastapi.security import APIKeyHeader
 from .config import Settings
 from .models import RunRequest, Source
 from .service import CollectorService
+from .sources import SPECS
 from .storage import Store
 
 header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -43,7 +44,7 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
 
     app = FastAPI(
         title="Job Agent Scraper",
-        version="0.1.0",
+        version="0.2.0",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -71,16 +72,25 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
         timer = app.state.service.timer
         if schedule and timer and timer.done():
             raise HTTPException(503, "Scheduler stopped")
-        return {"status": "ok", "version": "0.1.0"}
+        return {"status": "ok", "version": "0.2.0"}
 
     @app.get("/v1/sources", dependencies=[Depends(authorize)])
     def sources():
         config = app.state.settings
         attempts = app.state.store.attempts()
+        latest = {}
+        for run in app.state.store.runs(limit=100):
+            for source, result in run["results"].items():
+                latest.setdefault(source, result)
         return {
             "items": [
                 {
                     "source": source,
+                    "name": SPECS[source].name,
+                    "format": SPECS[source].format,
+                    "feed_url": SPECS[source].url,
+                    "documentation_url": SPECS[source].docs,
+                    "last_result": latest.get(source),
                     "last_attempt_at": attempts.get(source),
                     "next_allowed_at": (
                         datetime.fromisoformat(attempts[source])
@@ -96,6 +106,12 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
                 "jobs_per_source": config.max_jobs,
                 "pages_per_source": config.max_pages,
                 "interval_seconds": config.interval_seconds,
+            },
+            "scope": {
+                "remote_only": True,
+                "roles": "Full-stack/frontend development or developer roles with a JavaScript/TypeScript stack",
+                "search_terms": config.search_terms,
+                "geographic_eligibility": "Not inferred; inspect each posting's restrictions",
             },
         }
 

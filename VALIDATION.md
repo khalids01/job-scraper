@@ -1,26 +1,43 @@
-# Verification — 2026-10-18
+# Verification — 2026-10-18, version 0.2.0
 
-Executed in the sibling `job-scraper` directory. Existing Job Agent and Joblake source files
-were not modified. Temporary verification databases were isolated from user data and removed.
+All checks used the standalone `job-scraper` repository. Job Agent, the original Joblake project,
+DiskVacuum, production databases, and real desktop credentials were not modified by this change.
 
-- Python 3.14 virtual environment: `ruff check src tests` passed; `pytest -q` passed **18 tests**.
-  Tests cover normalization, uncertain locations, source attribution, pagination, malformed records,
-  unsafe URL schemes, blocked/non-JSON/schema failures, byte/job limits, upserts, filtering,
-  expiry/retention, API authentication/permissions, single-process ownership, source timeouts,
-  concurrent runs, cancellation, restart recovery, persistent cooldown, and startup scheduling.
-  The installed Starlette version emits a TestClient deprecation warning about httpx; tests pass.
-- A real Uvicorn subprocess passed localhost HTTP checks: health 200, unauthenticated jobs 401,
-  authenticated jobs 200. SIGTERM completed application shutdown. No server remains running.
-- `docker compose config --quiet` passed with temporary nonsecret validation values.
-- A live, single-page collection returned **132 normalized jobs**, all stored in temporary SQLite:
-  Remotive 12, Arbeitnow 100, Himalayas 20; zero invalid records. Arbeitnow and Himalayas were
-  truncated by the explicit pilot limits (100 jobs/source, one page/source), so the overall run
-  correctly reported `partial`. Exact result counters and timestamps are in `LIVE_CHECK.json`.
-  This verifies one bounded live run, not exhaustive coverage or ongoing source availability.
-- Docker image execution could **not** be verified: the build failed downloading Python base-image
-  metadata/blobs from `production.cloudfront.docker.com` with a TCP timeout. A pull through the
-  public ECR mirror also timed out. No Docker daemon configuration was changed. Run
-  `docker build --target test -t job-agent-scraper:test .` and `docker compose up -d --build`
-  on a host with working registry access to finish container verification.
+- **98 tests passed** on host Python 3.14 and in the Python 3.12 Docker test target. Ruff lint and
+  format checks passed. Fixtures cover all 23 source adapters, full-stack/JS/TS focus, unrelated
+  roles, remote claims and unknowns, mixed-board onsite/hybrid exclusion, JSON pagination budgets,
+  repeated cursors, deduplication, unsafe/non-feed XML, recoverable RSS, Atom metadata, source query
+  preservation, legacy database scope backfill, authentication and admin permissions, cancellation,
+  startup collection, persistent cooldown, upserts, expiration, retention and process ownership.
+  Starlette emits one TestClient deprecation warning about httpx; no test failures.
+- `docker compose config --quiet` passed with temporary nonsecret placeholder credentials.
+- `docker build --network=host --target test -t job-agent-scraper:test .` passed, including lint and
+  all 98 tests inside the image. The default local Docker bridge could not reach package indexes;
+  host networking was used only for the build, without changing Docker daemon configuration.
+- The runtime image built successfully. A temporary container ran as the configured unprivileged
+  user with read-only root, dropped capabilities, 512 MB memory limit and **no external network**.
+  With a synthetic SQLite seed and pre-marked source cooldowns, HTTP health/authentication, all 23
+  source entries, hiding unrelated stored jobs, and persisted jobs/cooldowns passed before and
+  after a container restart. The test container and its named volume were removed afterward.
+- The bounded live source sweep and targeted follow-up are saved in
+  [docs/live-validation.json](docs/live-validation.json) and
+  [docs/live-followup.json](docs/live-followup.json). Each provider has a successful live response.
+  The latest per-source samples total **294 matching postings**, before cross-source deduplication.
+  These are separate source snapshots, not a complete inventory or one transactional global run.
+- The first sweep recorded a RemoteJobs.org 503 and caught lost URL query selectors on certain
+  RSS feeds. Query preservation was fixed with regression tests; the targeted follow-up succeeded
+  for RemoteJobs.org, Jobspresso, Authentic Jobs, Landing.jobs and CryptoJobsList. Both reports are
+  retained so failures remain visible.
+- Real Work From Anywhere, NoDesk and Landing.jobs exposed recoverable XML errors. Their parser
+  warnings are recorded; the app marks runs with those warnings as partial. Zero malformed job
+  records were skipped in the latest successful samples. Some valid feeds produced zero matches.
+- [docs/SOURCES.md](docs/SOURCES.md) documents provider access/attribution, excluded candidates,
+  bounds, and scope limitations. [docs/research-inventory.csv](docs/research-inventory.csv)
+  preserves the 101-entry legacy discovery list and its disposition. Discovery entries are not
+  claims of live access. No exhaustive-internet coverage claim is made.
 
-No VPS deployment, Tauri integration, public port exposure, real API-key file, or commits were made.
+No VPS deployment or Tauri integration is part of this change. Existing `.env` source overrides
+must be updated or removed to enable all 23 providers in an existing installation.
+
+The initial 0.1.0 pilot (18 tests and 132 unfiltered postings from three sources) remains recorded
+in `LIVE_CHECK.json`; it is historical evidence, not the current scope or verification count.
