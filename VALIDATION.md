@@ -41,3 +41,16 @@ must be updated or removed to enable all 23 providers in an existing installatio
 
 The initial 0.1.0 pilot (18 tests and 132 unfiltered postings from three sources) remains recorded
 in `LIVE_CHECK.json`; it is historical evidence, not the current scope or verification count.
+
+
+## API-key and request-limit follow-up — version 0.2.1
+
+- Host Python 3.14 and Python 3.12 Docker tests: **108 passed**, including concurrent quota consumption, sliding-window boundary
+  recovery, rate-limit headers, independent key quotas, tighter admin-write quotas, invalid-key
+  attempts, client-IP caps, duplicate API-key headers, forwarded-header spoofing, bounded client
+  buckets, health-check exemption, and environment validation.
+- API keys are required and role-separated. A private, Git-ignored local `.env` was created with
+  independently generated read/admin keys, file permissions `0600`; values were not printed or
+  committed. Docker Hub credentials are separate.
+- Request limits are in-memory for the enforced single-process deployment; restarts reset API
+  windows. Existing source-fetch cooldowns still persist in SQLite across restarts.

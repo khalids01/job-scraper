@@ -9,6 +9,10 @@ services:
     environment:
       API_KEY: ${API_KEY:?Set API_KEY in .env}
       ADMIN_API_KEY: ${ADMIN_API_KEY:?Set ADMIN_API_KEY in .env}
+      API_RATE_LIMIT_PER_MINUTE: ${API_RATE_LIMIT_PER_MINUTE:-120}
+      ADMIN_RATE_LIMIT_PER_MINUTE: ${ADMIN_RATE_LIMIT_PER_MINUTE:-10}
+      AUTH_RATE_LIMIT_PER_MINUTE: ${AUTH_RATE_LIMIT_PER_MINUTE:-30}
+      IP_RATE_LIMIT_PER_MINUTE: ${IP_RATE_LIMIT_PER_MINUTE:-300}
       SOURCES: ${SOURCES:-remotive,arbeitnow,himalayas,remoteok,jobicy,workingnomads,reallyremote,remotejobsorg,weworkremotely,realworkfromanywhere,nodesk,jobspresso,authenticjobs,larajobs,vuejobs,wordpress,findjobit,cryptojobslist,cryptocurrencyjobs,fossjobs,landingjobs,hasjob,remotefirstjobs}
       SCRAPE_INTERVAL_SECONDS: ${SCRAPE_INTERVAL_SECONDS:-21600}
       MAX_JOBS: ${MAX_JOBS:-500}

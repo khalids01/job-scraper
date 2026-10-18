@@ -44,6 +44,38 @@ All endpoints except `/healthz` require `X-API-Key`. Read routes accept either k
 collection start/cancel require the admin key. Keep the read key in the desktop's OS credential
 store and make requests through Rust. Do not embed either key in frontend assets.
 
+These are **scraper API keys**, separate from the Docker Hub publishing token. Generate two
+independent values with `openssl rand -hex 32` and set `API_KEY` and `ADMIN_API_KEY` in the server's
+`.env`. The service refuses missing, short, or identical keys. Send the read value as
+`X-API-Key` from the desktop; reserve the admin value for collection controls. Keep `.env` private.
+
+### API request limits
+
+| Limit | Default | Environment variable |
+| --- | ---: | --- |
+| Requests per valid read/admin key, across endpoints | 120/minute | `API_RATE_LIMIT_PER_MINUTE` |
+| Admin write attempts, including start and cancel | 10/minute | `ADMIN_RATE_LIMIT_PER_MINUTE` |
+| Requests with missing/invalid keys, per client IP | 30/minute | `AUTH_RATE_LIMIT_PER_MINUTE` |
+| All requests per client IP | 300/minute | `IP_RATE_LIMIT_PER_MINUTE` |
+
+The limits use a sliding 60-second window. Exceeding any applicable limit returns **HTTP 429**
+and `Retry-After` in seconds. `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and
+`X-RateLimit-Reset` (Unix timestamp when the earliest slot becomes available) describe the bucket
+closest to exhaustion. Counts include failed requests. `/healthz` is exempt for liveness checks.
+Admin reads use the normal key quota; writes must fit both quotas. Two separate keys have separate
+key quotas, while requests from the same IP share the overall IP quota.
+
+Client identities come from the ASGI server, never directly from `X-Forwarded-For`. Configure
+Uvicorn's trusted proxy addresses correctly when deploying behind a reverse proxy. Untrusted
+headers do not create independent limiter identities. Invalid key values are never stored in
+limiter buckets. At most 4096 active rate-limit buckets are retained; new identities fail closed
+when capacity is exhausted. `RATE_LIMIT_MAX_CLIENTS` can adjust this bound for direct Uvicorn use.
+Limits are in memory and reset on server restart; the supported deployment remains one worker
+and one replica per database. Multi-replica rate limiting needs shared state.
+
+These API limits are separate from **source collection limits**: each source still has its
+persistent six-hour cooldown, response/request/job bounds, and upstream rate-limit handling.
+
 | Method | Path | Behavior |
 | --- | --- | --- |
 | GET | `/healthz` | Container/database/scheduler liveness; does not assert fresh source data |

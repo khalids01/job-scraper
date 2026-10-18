@@ -1,5 +1,4 @@
 import fcntl
-import hmac
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -9,6 +8,7 @@ from fastapi.security import APIKeyHeader
 
 from .config import Settings
 from .models import RunRequest, Source
+from .security import RateLimiter, RateLimitMiddleware, key_role
 from .service import CollectorService
 from .sources import SPECS
 from .storage import Store
@@ -35,6 +35,7 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
             store.recover()
             service = CollectorService(store, config, transport)
             app.state.store, app.state.service, app.state.settings = store, service, config
+            app.state.limiter = RateLimiter(max_clients=config.rate_limit_max_clients)
             if schedule:
                 service.timer = asyncio.create_task(service.schedule())
             try:
@@ -44,25 +45,20 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
 
     app = FastAPI(
         title="Job Agent Scraper",
-        version="0.2.0",
+        version="0.2.1",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
     )
+    app.add_middleware(RateLimitMiddleware, state=app.state)
 
     def authorize(key: Annotated[str | None, Depends(header)]):
-        config = app.state.settings
-        if key is None or not (
-            hmac.compare_digest(key.encode(), config.api_key.encode())
-            or hmac.compare_digest(key.encode(), config.admin_key.encode())
-        ):
+        if key_role(key, app.state.settings) is None:
             raise HTTPException(401, "Invalid API key")
 
     def admin(key: Annotated[str | None, Depends(header)]):
-        if key is None or not hmac.compare_digest(
-            key.encode(), app.state.settings.admin_key.encode()
-        ):
+        if key_role(key, app.state.settings) != "admin":
             raise HTTPException(403, "Admin API key required")
 
     @app.get("/healthz")
@@ -72,7 +68,7 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
         timer = app.state.service.timer
         if schedule and timer and timer.done():
             raise HTTPException(503, "Scheduler stopped")
-        return {"status": "ok", "version": "0.2.0"}
+        return {"status": "ok", "version": "0.2.1"}
 
     @app.get("/v1/sources", dependencies=[Depends(authorize)])
     def sources():
