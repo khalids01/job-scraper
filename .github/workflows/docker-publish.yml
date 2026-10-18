@@ -4,7 +4,7 @@ name: Build and publish Docker image
 #   DOCKERHUB_USERNAME: Docker Hub account with permission to push
 #   DOCKERHUB_TOKEN: Docker Hub access token with write permission
 # Optional secret:
-#   DOCKERHUB_REPOSITORY: full image name (defaults to <username>/job-scraper)
+#   DOCKERHUB_REPOSITORY: short repo name or namespace/repo (defaults to job-scraper)
 on:
   push:
     branches: [main]
@@ -24,7 +24,7 @@ jobs:
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-      IMAGE: ${{ secrets.DOCKERHUB_REPOSITORY || format('{0}/job-scraper', secrets.DOCKERHUB_USERNAME) }}
+      DOCKERHUB_REPOSITORY: ${{ secrets.DOCKERHUB_REPOSITORY }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -36,7 +36,18 @@ jobs:
         run: |
           : "${DOCKERHUB_USERNAME:?Set the DOCKERHUB_USERNAME Actions secret}"
           : "${DOCKERHUB_TOKEN:?Set the DOCKERHUB_TOKEN Actions secret}"
-          : "${IMAGE:?Set the DOCKERHUB_REPOSITORY Actions secret}"
+          repository="${DOCKERHUB_REPOSITORY:-job-scraper}"
+          repository="${repository#docker.io/}"
+          if [[ "$repository" == */* ]]; then
+            image="$repository"
+          else
+            image="$DOCKERHUB_USERNAME/$repository"
+          fi
+          if [[ ! "$image" =~ ^[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+            echo '::error::DOCKERHUB_REPOSITORY must be a lowercase repo name or namespace/repo, without a URL or tag'
+            exit 1
+          fi
+          printf 'IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
