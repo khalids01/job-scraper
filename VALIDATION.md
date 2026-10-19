@@ -1,3 +1,15 @@
+# Dokploy network correction — 2026-10-19
+
+- Explicitly attached the scraper to the external `dokploy-network` in `compose.yaml`.
+  Previously it depended on domain configuration to attach that network; isolated
+  deployments could leave internal MongoDB/Redis hostnames unreachable.
+- Updated instructions to disable isolated deployments, use database Internal Connection
+  URLs, retain authentication options, and create the network for standalone local Docker.
+- Compose validation with placeholder credentials and `git diff --check` passed. Python
+  runtime is unchanged; the 113-test MongoDB verification below remains applicable.
+- The VPS was not accessed. This addresses a potential missing network attachment; actual
+  hostname, credentials, database status, and permissions still require deployment validation.
+
 # Verification — 2026-10-19, version 0.4.0
 
 This version replaces SQLite with external MongoDB. Historical SQLite/embedded-Redis notes below

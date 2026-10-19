@@ -4,6 +4,8 @@ services:
       context: .
       target: runtime
     restart: unless-stopped
+    networks:
+      - dokploy-network
     expose:
       - "8000"
     environment:
@@ -32,3 +34,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  dokploy-network:
+    external: true

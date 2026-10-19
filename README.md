@@ -8,7 +8,9 @@ a VPS. There are 23 reviewed JSON/RSS/Atom source adapters. No Python installati
 
 1. Create a **Docker Compose** service in your Dokploy project.
 2. Select the GitHub provider, repository `khalids01/job-scraper`, branch `main`,
-   and Compose Path `./compose.yaml`. Use Compose, not Docker Stack.
+   and Compose Path `./compose.yaml`. Use Compose, not Docker Stack. Keep **Isolated
+   Deployments disabled**: this configuration explicitly joins the shared `dokploy-network`
+   so it can resolve and connect to Dokploy database services on this server.
 3. In **Environment**, set the following and save:
 
    ```dotenv
@@ -24,6 +26,11 @@ a VPS. There are 23 reviewed JSON/RSS/Atom source adapters. No Python installati
    if omitted, MongoDB defaults to `job_scraper`. The MongoDB account needs read/write
    and index-creation permissions in that database. Both hosts must be reachable from
    the scraper container; `localhost` refers to the scraper container itself.
+   For MongoDB/Redis managed by this same Dokploy VPS, copy the database service's
+   **Internal Connection URL**. Keep its service hostname and internal port; do not
+   substitute the public API domain. Preserve its authentication options. A root MongoDB
+   user normally authenticates against `admin` even when jobs use `/job_scraper`.
+   Confirm each database is running and attached to `dokploy-network`.
 4. In **Domains**, select service `scraper`, container port `8000`, path `/`, and
    your API hostname. Point its DNS A record to the VPS, enable HTTPS/Let's Encrypt.
 5. Click **Deploy**, check the logs, and request `https://YOUR_HOST/healthz`.
@@ -45,7 +52,9 @@ and [domain routing](https://docs.dokploy.com/docs/core/docker-compose/domains).
 
 ### Local Docker
 
-Copy `.env.example` to `.env` and fill in the same four values. To publish a local
+Copy `.env.example` to `.env` and fill in the same four values. Outside Dokploy, create
+the external network once with `docker network create dokploy-network` (if it does not
+already exist). To publish a local
 port, create a `compose.local.yaml` override:
 
 ```yaml
