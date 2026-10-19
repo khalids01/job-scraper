@@ -331,3 +331,45 @@ For an **explicit, sparingly used maintainer live check**, run:
 It makes at most one request/source and writes no production data. Do not run it repeatedly:
 provider limits still apply. Automated tests use synthetic fixtures and never hit job providers.
 The saved live reports in `docs/` record failures, filtering and warnings as well as successes.
+
+## Semantic matching (v0.5)
+
+`POST /v1/matches` requires the same `X-API-Key` and Redis quota as other protected endpoints.
+Example JSON body (no resume upload is required by the service):
+
+```json
+{
+  "profile": "Full-stack developer with TypeScript, React, Node.js and MongoDB experience",
+  "titles": ["Full Stack Developer", "TypeScript Developer"],
+  "remote_only": true,
+  "excluded_terms": ["internship"],
+  "limit": 100
+}
+```
+
+Optional `q` restricts title/company; `source` selects an enabled source identifier. Titles are
+soft semantic signals, so related titles remain discoverable. Existing feed collection scope
+(remote full-stack/frontend/JavaScript/TypeScript roles) is unchanged; this endpoint searches the
+collected corpus and does not crawl sites on each user search.
+
+The service uses FastEmbed with the CPU BGE-small English model, packaged into the Docker image
+at build time. Runtime matching uses local model files, without paid AI APIs or runtime model
+downloads. The response contains `items: [{job, score}]`, `model`, `scanned`, `total`, and
+`truncated`. Scores are 100 × (80% profile cosine similarity + 20% best title similarity), clipped
+to 0–100; with no titles, the profile alone determines the score. They are not hiring probabilities.
+Profile text is bounded to 6,000 characters for embedding; job embeddings use the title, tags and
+first 2,200 description characters. Returned descriptions are bounded to 6,000 characters; use the
+original posting or existing job-detail endpoint for full text.
+
+At most 1,000 recent active collected jobs are scanned and 100 ranked candidates returned. Remote
+and literal excluded-term filters run before ranking. Geography, timezone, salary comparability,
+work authorization and other detailed eligibility checks still require the desktop/reviewer.
+Incomplete corpus coverage is disclosed via `truncated`; narrow `q`/`source` as needed.
+A bounded in-memory job-embedding cache avoids repeat inference. Candidate profiles are neither
+persisted nor cached. Matching requests are serialized; concurrent inference gets HTTP 429 with
+`Retry-After: 5`, preventing multiple corpora/models from exhausting container memory.
+
+Compose now allocates up to 1.5 GiB RAM for the model and corpus. Keep the existing API, MongoDB,
+Redis and image environment variables; no additional secret is needed. Local development can set
+`FASTEMBED_CACHE_PATH` to a pre-downloaded model directory. JEV and selected-LLM decisions run
+through desktop-native credentials and are not configured on the scraper service.

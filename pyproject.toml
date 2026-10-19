@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "job-agent-scraper"
-version = "0.4.0"
+version = "0.5.0"
 description = "Standalone job collection API for Job Agent"
 requires-python = ">=3.12"
 dependencies = [
+  "fastembed>=0.7,<0.8",
   "fastapi>=0.115,<1",
   "uvicorn>=0.34,<1",
   "httpx>=0.28,<1",

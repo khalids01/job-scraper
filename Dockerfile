@@ -3,6 +3,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
 COPY requirements.lock ./
 RUN pip install -r requirements.lock
+ENV FASTEMBED_CACHE_PATH=/models TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1
+RUN mkdir /models && python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5', cache_dir='/models')" && chmod -R a+rX /models
 COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --no-deps .

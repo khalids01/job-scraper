@@ -9,6 +9,7 @@ from pymongo.errors import PyMongoError
 from redis.exceptions import RedisError
 
 from .config import Settings
+from .matching import MatchingBusy, MatchRequest, SemanticMatcher
 from .models import RunRequest, Source
 from .security import RateLimitMiddleware, RedisRateLimiter, valid_key
 from .service import CollectorService
@@ -74,13 +75,14 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
 
     app = FastAPI(
         title="Job Agent Scraper",
-        version="0.4.0",
+        version="0.5.0",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
     )
     app.add_middleware(RateLimitMiddleware, state=app.state)
+    matcher = SemanticMatcher()
 
     @app.exception_handler(PyMongoError)
     async def database_error(request, exc):
@@ -109,7 +111,7 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
         timer = app.state.service.timer
         if schedule and timer and timer.done():
             raise HTTPException(503, "Scheduler stopped")
-        return {"status": "ok", "version": "0.4.0"}
+        return {"status": "ok", "version": "0.5.0"}
 
     @app.get("/v1/sources", dependencies=[Depends(authorize)])
     def sources():
@@ -173,6 +175,17 @@ def create_app(settings: Settings | None = None, *, transport=None, schedule=Tru
             offset=offset,
             include_expired=include_expired,
         )
+
+    @app.post("/v1/matches", dependencies=[Depends(authorize)])
+    def matches(request: MatchRequest):
+        try:
+            return matcher.rank(app.state.store, request)
+        except MatchingBusy:
+            raise HTTPException(
+                429, "Matching is busy; retry shortly", headers={"Retry-After": "5"}
+            ) from None
+        except (OSError, ValueError, RuntimeError):
+            raise HTTPException(503, "Matching model unavailable; check model files") from None
 
     @app.get("/v1/jobs/{job_id}", dependencies=[Depends(authorize)])
     def job(job_id: str):

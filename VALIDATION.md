@@ -134,3 +134,13 @@ in `LIVE_CHECK.json`; it is historical evidence, not the current scope or verifi
   configured two-request quota, kept returning 429 after a scraper restart and a Redis AOF restart,
   returned 503 while Redis was stopped, and recovered with the same quota after Redis restarted.
   Temporary containers, volumes and network were removed; no production data was used.
+
+## 2026-10-19: v0.5 semantic matching
+
+- Docker Python 3.12 test target: 133 tests passed; Ruff passed. Tests use private MongoDB
+  and Redis, including endpoint authentication, shared quota, bounded input validation,
+  deterministic semantic-ranking fixtures, job-only embedding cache and busy-inference rejection.
+- CPU BGE-small real-model smoke: TypeScript/React web job ranked ahead of sales/data-science jobs.
+- Runtime Docker image builds with packaged weights. Non-root, read-only, network-disabled
+  runtime under the Compose RAM/PID bounds successfully performs real semantic inference.
+- No paid AI APIs or production MongoDB/Redis were used for these validations.
