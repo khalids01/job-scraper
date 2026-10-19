@@ -3,6 +3,7 @@
 import hashlib
 import os
 import threading
+import time
 from collections import OrderedDict
 from typing import Annotated
 
@@ -39,13 +40,20 @@ class SemanticMatcher:
     def _vectors(self, texts):
         keys = [hashlib.sha256(text.encode()).hexdigest() for text in texts]
         missing = dict((key, text) for key, text in zip(keys, texts) if key not in self.cache)
-        if missing:
-            vectors = self.model.embed(list(missing.values()), batch_size=32)
-            for key, vector in zip(missing, vectors):
+        # Keep each HTTP request bounded while the shared job index warms up.
+        pending = list(missing.items())
+        deadline = time.monotonic() + 10
+        for start in range(0, len(pending), 8):
+            batch = pending[start : start + 8]
+            vectors = self.model.embed([text for _, text in batch], batch_size=8)
+            for (key, _), vector in zip(batch, vectors):
                 self.cache[key] = np.asarray(vector)
-        result = [self.cache[key] for key in keys]
+            if time.monotonic() >= deadline:
+                break
+        result = [self.cache.get(key) for key in keys]
         for key in keys:
-            self.cache.move_to_end(key)
+            if key in self.cache:
+                self.cache.move_to_end(key)
         while len(self.cache) > 4096:
             self.cache.popitem(last=False)
         return result
@@ -81,6 +89,8 @@ class SemanticMatcher:
                 "truncated": page["total"] > 1000,
                 "model": MODEL,
                 "scanned": len(page["items"]),
+                "indexed": 0,
+                "indexing": False,
             }
         # Serialize inference and lazy initialization to bound memory/CPU under concurrent calls.
         if self.model is None:
@@ -104,6 +114,8 @@ class SemanticMatcher:
 
         ranked = []
         for job, vector in zip(jobs, vectors):
+            if vector is None:
+                continue
             profile_score = cosine(query_vectors[0], vector)
             title_score = max((cosine(q, vector) for q in query_vectors[1:]), default=profile_score)
             score = round(100 * max(0, min(1, 0.8 * profile_score + 0.2 * title_score)), 1)
@@ -118,4 +130,6 @@ class SemanticMatcher:
             "truncated": page["total"] > len(page["items"]),
             "model": MODEL,
             "scanned": len(page["items"]),
+            "indexed": len(ranked),
+            "indexing": any(vector is None for vector in vectors),
         }

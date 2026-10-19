@@ -104,3 +104,33 @@ def test_busy_matcher_rejects_without_loading_another_corpus():
             matcher.rank(Store(), MatchRequest(profile="experienced developer"))
     finally:
         matcher.lock.release()
+
+
+def test_cold_index_returns_progress_and_resumes_cached_batches(monkeypatch):
+    import job_scraper.matching as module
+
+    clock = [0.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+
+    class SlowEmbedding:
+        def embed(self, texts, **kwargs):
+            for _ in texts:
+                clock[0] += 2
+                yield np.array([1.0, 0.0])
+
+    class ManyJobs:
+        def jobs(self, **kwargs):
+            return {
+                "total": 10,
+                "items": [
+                    {"id": str(i), "title": f"developer {i}", "description": "web", "tags": []}
+                    for i in range(10)
+                ],
+            }
+
+    matcher = SemanticMatcher(SlowEmbedding())
+    request = MatchRequest(profile="experienced developer")
+    first = matcher.rank(ManyJobs(), request)
+    assert first["indexing"] and first["indexed"] == 8
+    second = matcher.rank(ManyJobs(), request)
+    assert not second["indexing"] and second["indexed"] == 10

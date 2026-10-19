@@ -137,10 +137,13 @@ in `LIVE_CHECK.json`; it is historical evidence, not the current scope or verifi
 
 ## 2026-10-19: v0.5 semantic matching
 
-- Docker Python 3.12 test target: 133 tests passed; Ruff passed. Tests use private MongoDB
+- Docker Python 3.12 test target: 134 tests passed; Ruff passed. Tests use private MongoDB
   and Redis, including endpoint authentication, shared quota, bounded input validation,
   deterministic semantic-ranking fixtures, job-only embedding cache and busy-inference rejection.
 - CPU BGE-small real-model smoke: TypeScript/React web job ranked ahead of sales/data-science jobs.
 - Runtime Docker image builds with packaged weights. Non-root, read-only, network-disabled
   runtime under the Compose RAM/PID bounds successfully performs real semantic inference.
 - No paid AI APIs or production MongoDB/Redis were used for these validations.
+
+- Cold-index regression: API returns partial rankings and indexed/indexing progress within a
+  batch work budget; subsequent requests reuse cached batches and complete the corpus.

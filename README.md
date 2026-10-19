@@ -355,7 +355,7 @@ collected corpus and does not crawl sites on each user search.
 The service uses FastEmbed with the CPU BGE-small English model, packaged into the Docker image
 at build time. Runtime matching uses local model files, without paid AI APIs or runtime model
 downloads. The response contains `items: [{job, score}]`, `model`, `scanned`, `total`, and
-`truncated`. Scores are 100 × (80% profile cosine similarity + 20% best title similarity), clipped
+`truncated`, plus `indexed` and `indexing`. Scores are 100 × (80% profile cosine similarity + 20% best title similarity), clipped
 to 0–100; with no titles, the profile alone determines the score. They are not hiring probabilities.
 Profile text is bounded to 6,000 characters for embedding; job embeddings use the title, tags and
 first 2,200 description characters. Returned descriptions are bounded to 6,000 characters; use the
@@ -366,7 +366,11 @@ and literal excluded-term filters run before ranking. Geography, timezone, salar
 work authorization and other detailed eligibility checks still require the desktop/reviewer.
 Incomplete corpus coverage is disclosed via `truncated`; narrow `q`/`source` as needed.
 A bounded in-memory job-embedding cache avoids repeat inference. Candidate profiles are neither
-persisted nor cached. Matching requests are serialized; concurrent inference gets HTTP 429 with
+persisted nor cached. Cold indexes advance in batches of eight within a roughly ten-second
+work budget per request (the current batch finishes). While `indexing` is true, returned rankings
+are preliminary; repeat the request to advance indexing until it is false. The desktop refreshes
+progress automatically and blocks paid evaluation until the index is ready. Matching requests
+are serialized; concurrent inference gets HTTP 429 with
 `Retry-After: 5`, preventing multiple corpora/models from exhausting container memory.
 
 Compose now allocates up to 1.5 GiB RAM for the model and corpus. Keep the existing API, MongoDB,
