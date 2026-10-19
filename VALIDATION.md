@@ -1,3 +1,18 @@
+# Publish-before-deploy pipeline — 2026-10-19
+
+- `compose.yaml` now pulls `SCRAPER_IMAGE` with `pull_policy: always` and has no build section.
+  The shared Dokploy network and external MongoDB/Redis configuration are preserved.
+- GitHub Actions requests `POST /api/compose.deploy` only after successful tests and Docker Hub
+  publication on main. The optional three deployment secrets are passed only to that step.
+  Direct Dokploy git-push auto deployment must be disabled in the user's dashboard.
+- **128 tests passed** against private MongoDB/Redis. The 15 added deployment checks use mock
+  HTTP transports, verifying request method/endpoint/authentication/body, disabled/partial setup,
+  URL validation, failure redaction, no retries, and prevention of credential-forwarding redirects.
+- Actionlint v1.7.12, Ruff, Compose validation with placeholder credentials, and
+  `git diff --check` passed. Runtime Python storage/security code is unchanged.
+- No live Dokploy API was invoked. The user must configure the three GitHub deployment secrets,
+  disable direct git auto deployment, and set the published Docker Hub image in Dokploy Environment.
+
 # Dokploy network correction — 2026-10-19
 
 - Explicitly attached the scraper to the external `dokploy-network` in `compose.yaml`.

@@ -1,8 +1,7 @@
 services:
   scraper:
-    build:
-      context: .
-      target: runtime
+    image: ${SCRAPER_IMAGE:?Set SCRAPER_IMAGE to your published Docker Hub image with tag}
+    pull_policy: always
     restart: unless-stopped
     networks:
       - dokploy-network

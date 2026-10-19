@@ -14,6 +14,7 @@ a VPS. There are 23 reviewed JSON/RSS/Atom source adapters. No Python installati
 3. In **Environment**, set the following and save:
 
    ```dotenv
+   SCRAPER_IMAGE=YOUR_DOCKERHUB_USERNAME/job-scraper:latest
    API_KEY=your-secret-key-at-least-32-characters
    MAX_REQ_PER_MIN=120
    MONGODB_URL=mongodb://USER:PASSWORD@HOST:27017/job_scraper?authSource=admin
@@ -36,11 +37,39 @@ a VPS. There are 23 reviewed JSON/RSS/Atom source adapters. No Python installati
 5. Click **Deploy**, check the logs, and request `https://YOUR_HOST/healthz`.
    The first collection starts automatically; jobs may take a few minutes to appear.
 
-Compose builds the checked-out revision using the Dockerfile's `runtime` target.
-It does not wait for or depend on Docker Hub publication. GitHub Actions separately
-continues testing and publishing the same runtime image. The file contains no database
-containers, host port bindings, secrets, or local data volumes. Dokploy handles domain
-routing. Data persists in the external MongoDB/Redis services across deployments.
+Compose pulls the published Docker Hub image using `pull_policy: always`; it does not build
+on the VPS. Set `SCRAPER_IMAGE` to the exact Docker Hub repository published by Actions,
+including `:latest`. This is a deployment setting, not an API credential. Private images need
+Docker Hub pull credentials configured on the Dokploy server. The file contains no database
+containers, host port bindings, secrets, or local data volumes. Data persists in external
+MongoDB/Redis across deployments.
+
+### Deploy only after image publication
+
+1. **Disable Dokploy's GitHub Auto Deploy** and any direct push webhooks or polling/schedules.
+   A git push must not trigger deployment while the image is still building.
+2. In GitHub repository **Settings → Secrets and variables → Actions**, add:
+
+   | Secret | Value |
+   | --- | --- |
+   | `DOKPLOY_URL` | HTTPS dashboard origin, e.g. `https://dokploy.example.com`, without `/api` |
+   | `DOKPLOY_API_KEY` | Token generated in your Dokploy profile/API settings |
+   | `DOKPLOY_COMPOSE_ID` | Compose service ID, not project ID or application ID |
+
+   Find the Compose ID in the service page URL (`composeId`), or use Dokploy's
+   `GET /api/project.all` response to locate the service. Keep these secrets in GitHub;
+   they are not passed into the scraper container and are separate from its `API_KEY`.
+3. Push to `main` or re-run **Build and publish Docker image** on `main`.
+
+The workflow tests, builds and pushes `:latest` and the commit tag, then calls
+`POST /api/compose.deploy` with the Compose ID and `x-api-key` header. The deployment
+step runs only when all previous steps succeed. Dokploy pulls the published image before
+creating the replacement container. A failed build/push never triggers deployment.
+If all three deployment secrets are absent, image publishing continues and the deployment
+step logs that it was skipped; partial configuration fails the deployment step. API acceptance
+means the deployment was queued, not that the container has passed its health check.
+There are no automatic deployment request retries, avoiding duplicate queued deployments.
+
 Use **one worker and one replica** per MongoDB database, with stop-before-start
 replacement. A MongoDB lease rejects concurrent collectors; after an unclean exit,
 allow up to 60 seconds for the old lease to expire. If lease renewal fails, collection
@@ -52,7 +81,7 @@ and [domain routing](https://docs.dokploy.com/docs/core/docker-compose/domains).
 
 ### Local Docker
 
-Copy `.env.example` to `.env` and fill in the same four values. Outside Dokploy, create
+Copy `.env.example` to `.env` and fill in the image and four runtime values. Outside Dokploy, create
 the external network once with `docker network create dokploy-network` (if it does not
 already exist). To publish a local
 port, create a `compose.local.yaml` override:
@@ -65,9 +94,12 @@ services:
 ```
 
 ```bash
-docker compose -f compose.yaml -f compose.local.yaml up -d --build
+docker compose -f compose.yaml -f compose.local.yaml up -d
 curl http://127.0.0.1:8787/healthz
 ```
+
+For a local source build, run `docker build --target runtime -t job-scraper:local .`,
+set `SCRAPER_IMAGE=job-scraper:local`, and start with `up -d --pull never`.
 
 The container runs as an unprivileged user with a read-only root filesystem. Collection
 repeats every six hours. Source attempts are persisted before fetching, so failures,
